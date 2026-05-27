@@ -1,0 +1,33 @@
+# Python cache and local tool output
+__pycache__/
+*.py[cod]
+.codex_build/
+
+# Runtime logs and temporary captures
+*.log
+log.txt
+*.tmp
+*.bak
+
+# Keil / ARMCC build output
+MDK-ARM/spi_bmi088/
+MDK-ARM/test_compile/
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.lst
+MDK-ARM/*.map
+MDK-ARM/*.axf
+MDK-ARM/*.hex
+MDK-ARM/*.bin
+MDK-ARM/*.crf
+MDK-ARM/*.d
+MDK-ARM/*.o
+MDK-ARM/*.dep
+MDK-ARM/*.lnp
+MDK-ARM/*.htm
+MDK-ARM/*.build_log.htm
+
+# IDE and OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

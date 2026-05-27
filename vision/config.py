@@ -1,0 +1,23 @@
+class VisionConfig:
+    model_name = "jixun2"
+    model_file = "jixun2.mud"
+    expected_labels = (
+        "apple",
+        "banana",
+        "strawberry",
+        "watermelon",
+        "target",
+        "green_square",
+        "red_triangle",
+        "yellow_trapezoid",
+    )
+
+    camera_width = 960
+    camera_height = 720
+    digital_zoom_scale = 1.60
+    conf_th = 0.25
+    iou_th = 0.45
+
+    uart_dev = "/dev/ttyS2"
+    uart_baud = 115200
+    target_send_period_ms = 50
