@@ -5,6 +5,9 @@ from trackers.roi_color_tracker import DynamicColorModel
 from trackers.kalman_center_tracker import KalmanCenterTracker
 from trackers.snap_gate import StrongSnapGate
 from comm.udp_debug import UdpDebugSender
+from task import BTaskController, TASK_NAMES
+from task.constants import MCU_READY_STATES
+from task.target_center import TargetCenterFinder
 
 try:
     from maix import pinmap
@@ -28,8 +31,12 @@ UDP_DEBUG_ENABLE = True
 UDP_DEBUG_HOST = "255.255.255.255"
 UDP_DEBUG_PORT = 5005
 UDP_DEBUG_PERIOD_MS = 30
-CONSOLE_DEBUG_ENABLE = True
+CONSOLE_DEBUG_ENABLE = False
 CONSOLE_DEBUG_PERIOD_MS = 500
+TASK_DEBUG_ENABLE = True
+TASK_DEBUG_CONSOLE_ENABLE = True
+TASK_DEBUG_UDP_ENABLE = True
+TASK_DEBUG_PERIOD_MS = 300
 SAFE_TX_MAX_STEP_X = 75
 SAFE_TX_MAX_STEP_Y = 62
 SAFE_TX_MAX_ABS_X = 160
@@ -38,6 +45,12 @@ TARGET_OUTPUT_SCALE_X = 0.70
 TARGET_OUTPUT_SCALE_Y = 0.70
 TARGET_OUTPUT_DEADBAND_X = 2
 TARGET_OUTPUT_DEADBAND_Y = 2
+CIRCLE_TX_MAX_STEP_X = 18
+CIRCLE_TX_MAX_STEP_Y = 16
+CIRCLE_OUTPUT_SCALE_X = 0.55
+CIRCLE_OUTPUT_SCALE_Y = 0.55
+CIRCLE_OUTPUT_DEADBAND_X = 0.4
+CIRCLE_OUTPUT_DEADBAND_Y = 0.4
 SAFE_TX_JUMP_REJECT_PIXELS = 120
 SAFE_TX_JUMP_CONFIRM_FRAMES = 2
 CONF_TH = 0.25
@@ -55,8 +68,9 @@ TRACK_ACCEPT_MAX_SIZE_DELTA_RATIO = 0.65
 LASER_MASK_ENABLE = False
 LASER_MASK_RADIUS = 34
 LASER_MASK_MAX_BOX_SIZE = 42
-LASER_INPUT_MASK_ENABLE = False
-LASER_INPUT_MASK_RADIUS = 18
+LASER_INPUT_MASK_ENABLE = True
+LASER_INPUT_MASK_RADIUS = 7
+LASER_INPUT_SAMPLE_PAD = 5
 TOUCH_DEBOUNCE_MS = 220
 SMOOTH_ALPHA = 0.15
 OUTPUT_CENTER_DEADBAND_PIXELS = 3
@@ -200,6 +214,11 @@ CANDIDATE_MATCH_DIST = 95
 SELECT_CLEAR_CODE = -1
 CALIBRATE_CODE = -2
 CALIBRATE_TOUCH_CODE = -3
+TASK_SELECT_CODE = -4
+TASK_PAGE_CODE = -5
+CALIB_PAGE_CODE = -6
+UI_PAGE_TASK = 0
+UI_PAGE_CALIB = 1
 VSTATE_SEARCH = 0
 VSTATE_TRACK = 1
 VSTATE_SUSPECT = 2
@@ -287,6 +306,11 @@ yolo_frame_div = 0
 udp_debug = UdpDebugSender(UDP_DEBUG_ENABLE, UDP_DEBUG_HOST, UDP_DEBUG_PORT)
 last_udp_debug_ms = 0
 last_console_debug_ms = 0
+last_task_debug_ms = 0
+task_controller = None
+ui_page = UI_PAGE_TASK
+target_center_finder = None
+target_center_result = None
 
 stat = {
     "time_ms": 0,
@@ -301,9 +325,9 @@ stat = {
     "key": 1,
     "key_raw": 1,
     "key_hold_ms": 0,
-    "angle_target": 0.0,
-    "angle_err": 0.0,
-    "angle_phase": 0,
+    "vision_active": 0,
+    "vision_pitch_offset": 0.0,
+    "vision_yaw_offset": 0.0,
     "rx": 0,
     "tx": 0,
 }
@@ -325,6 +349,8 @@ def log(msg):
 
 def state_name():
     state = stat["state"]
+    if state in MCU_READY_STATES:
+        return "READY"
     if 0 <= state < len(STATE_NAMES):
         return STATE_NAMES[state]
     return "UNKNOWN"
@@ -424,9 +450,9 @@ def parse_line(line):
                 stat["yaw_abs"] = float(parts[10])
                 stat["pitch_current"] = float(parts[11])
                 stat["yaw_current"] = float(parts[12])
-                stat["angle_phase"] = int(parts[13])
-                stat["angle_target"] = float(parts[14])
-                stat["angle_err"] = float(parts[15])
+                stat["vision_active"] = int(parts[13])
+                stat["vision_pitch_offset"] = float(parts[14])
+                stat["vision_yaw_offset"] = float(parts[15])
             else:
                 stat["pitch_abs"] = float(parts[3])
                 stat["yaw_abs"] = float(parts[4])
@@ -442,9 +468,9 @@ def parse_line(line):
                     stat["key_raw"] = int(parts[12])
                     stat["key_hold_ms"] = int(parts[13])
                 if len(parts) >= 17:
-                    stat["angle_target"] = float(parts[14])
-                    stat["angle_err"] = float(parts[15])
-                    stat["angle_phase"] = int(parts[16])
+                    stat["vision_pitch_offset"] = float(parts[14])
+                    stat["vision_yaw_offset"] = float(parts[15])
+                    stat["vision_active"] = int(parts[16])
         except Exception as e:
             log("bad stat: %s line=%s" % (e, line))
             return
@@ -452,13 +478,13 @@ def parse_line(line):
         now = time.ticks_ms()
         if now - last_stat_log_ms >= STAT_LOG_PERIOD_MS:
             last_stat_log_ms = now
-            log("t=%lu state=%s(%d) key=%d raw=%d hold=%lu pitch=%.2f enc=%.2f yaw=%.2f ip=%.2f iy=%.2f dx=%d dy=%d at=%.2f ae=%.2f ph=%d" %
+            log("t=%lu state=%s(%d) key=%d raw=%d hold=%lu pitch=%.2f enc=%.2f yaw=%.2f ip=%.2f iy=%.2f dx=%d dy=%d va=%d vpo=%.3f vyo=%.3f" %
                 (stat["time_ms"], state_name(), stat["state"],
                  stat["key"], stat["key_raw"], stat["key_hold_ms"],
                  stat["pitch_abs"], stat["pitch_enc"],
                  stat["yaw_abs"], stat["pitch_current"], stat["yaw_current"],
                  stat["dx"], stat["dy"],
-                 stat["angle_target"], stat["angle_err"], stat["angle_phase"]))
+                 stat["vision_active"], stat["vision_pitch_offset"], stat["vision_yaw_offset"]))
 
 def poll_uart():
     if serial is None:
@@ -541,21 +567,37 @@ def target_offset_for_mcu(obj):
     raw_dy = clamp_abs(raw_dy, SAFE_TX_MAX_ABS_Y)
     return raw_dx, raw_dy
 
-def send_target(obj):
+def target_offset_for_circle(obj):
+    offset = target_offset(obj)
+    if offset is None:
+        return None
+    raw_dx, raw_dy = offset
+    raw_dx = int(apply_output_deadband(raw_dx, CIRCLE_OUTPUT_DEADBAND_X) * CIRCLE_OUTPUT_SCALE_X)
+    raw_dy = int(apply_output_deadband(raw_dy, CIRCLE_OUTPUT_DEADBAND_Y) * CIRCLE_OUTPUT_SCALE_Y)
+    raw_dx = clamp_abs(raw_dx, SAFE_TX_MAX_ABS_X)
+    raw_dy = clamp_abs(raw_dy, SAFE_TX_MAX_ABS_Y)
+    return raw_dx, raw_dy
+
+def send_target(obj, search_request = False, circle_mode = False):
     global last_target_tx_ms, last_tx_packet, safe_tx_dx, safe_tx_dy, safe_tx_jump_count
     now = time.ticks_ms()
     if now - last_target_tx_ms < TARGET_SEND_PERIOD_MS:
         return
     last_target_tx_ms = now
-    offset = target_offset_for_mcu(obj)
+    offset = target_offset_for_circle(obj) if circle_mode else target_offset_for_mcu(obj)
     if offset is None:
-        uart_write("0,0,0\n")
+        reset_tx_filter()
+        if search_request:
+            uart_write("0,0,2\n")
+        else:
+            uart_write("0,0,0\n")
         return
 
     raw_dx, raw_dy = offset
     jump_dx = raw_dx - safe_tx_dx
     jump_dy = raw_dy - safe_tx_dy
-    if (jump_dx * jump_dx + jump_dy * jump_dy >
+    if (not circle_mode and
+            jump_dx * jump_dx + jump_dy * jump_dy >
             SAFE_TX_JUMP_REJECT_PIXELS * SAFE_TX_JUMP_REJECT_PIXELS):
         safe_tx_jump_count += 1
         if safe_tx_jump_count < SAFE_TX_JUMP_CONFIRM_FRAMES:
@@ -565,10 +607,13 @@ def send_target(obj):
     else:
         safe_tx_jump_count = 0
 
-    safe_tx_dx = limit_step(safe_tx_dx, raw_dx, SAFE_TX_MAX_STEP_X)
-    safe_tx_dy = limit_step(safe_tx_dy, raw_dy, SAFE_TX_MAX_STEP_Y)
+    step_x = CIRCLE_TX_MAX_STEP_X if circle_mode else SAFE_TX_MAX_STEP_X
+    step_y = CIRCLE_TX_MAX_STEP_Y if circle_mode else SAFE_TX_MAX_STEP_Y
+    safe_tx_dx = limit_step(safe_tx_dx, raw_dx, step_x)
+    safe_tx_dy = limit_step(safe_tx_dy, raw_dy, step_y)
     last_tx_packet = (safe_tx_dx, safe_tx_dy)
-    uart_write("%d,%d,1\n" % (safe_tx_dx, safe_tx_dy))
+    valid_flag = 3 if circle_mode else 1
+    uart_write("%d,%d,%d\n" % (safe_tx_dx, safe_tx_dy, valid_flag))
 
 def send_debug_status(target_obj, output_valid, yolo_obj, yolo_reason):
     global last_udp_debug_ms, last_console_debug_ms
@@ -600,22 +645,84 @@ def send_debug_status(target_obj, output_valid, yolo_obj, yolo_reason):
         ycx, ycy = obj_center(yolo_obj)
         yscore = yolo_obj.score
 
-    kready, ksrc, kpx, kpy, kmx, kmy, kox, koy, kvx, kvy, kix, kiy, kmiss = kalman_tracker.debug_values()
     gate_reason, gate_dist, gate_count = strong_snap_gate.debug_values()
     line = (
-        "K,t=%lu,vs=%s,valid=%d,tx=%d,%d,tgt=%d,%d,yolo=%d,%d,ys=%.2f,yr=%s,gate=%s,gd=%d,gc=%d,kr=%d,ks=%s,kp=%d,%d,km=%d,%d,ko=%d,%d,kv=%.1f,%.1f,ki=%.1f,%.1f,miss=%d,stm=%d,sdx=%d,sdy=%d,ph=%d,at=%.2f,ae=%.2f" %
+        "V,t=%lu,vs=%s,valid=%d,tx=%d,%d,tgt=%d,%d,yolo=%d,%d,ys=%.2f,yr=%s,gate=%s,gd=%d,gc=%d,stm=%d,sdx=%d,sdy=%d,va=%d,vpo=%.3f,vyo=%.3f" %
         (ticks(), vision_state_name(), tx_valid, tx_dx, tx_dy,
          tcx, tcy, ycx, ycy, yscore, yolo_reason,
          gate_reason, gate_dist, gate_count,
-         kready, ksrc, kpx, kpy, kmx, kmy, kox, koy, kvx, kvy, kix, kiy, kmiss,
          stat["state"], stat["dx"], stat["dy"],
-         stat["angle_phase"], stat["angle_target"], stat["angle_err"]))
+         stat["vision_active"], stat["vision_pitch_offset"], stat["vision_yaw_offset"]))
     if need_udp:
         last_udp_debug_ms = now
         udp_debug.send(line)
     if need_console:
         last_console_debug_ms = now
         print(line)
+
+def send_task_debug(control_obj, output_valid, task_tx_offset):
+    global last_task_debug_ms
+    if not TASK_DEBUG_ENABLE or task_controller is None:
+        return
+    now = time.ticks_ms()
+    if now - last_task_debug_ms < TASK_DEBUG_PERIOD_MS:
+        return
+    last_task_debug_ms = now
+
+    runtime = task_controller.runtime
+    tx_dx = 0
+    tx_dy = 0
+    tx_valid = 0
+    if output_valid and task_tx_offset is not None:
+        tx_dx, tx_dy = task_tx_offset
+        tx_valid = 1
+
+    cx = -1
+    cy = -1
+    if control_obj is not None:
+        cx, cy = obj_center(control_obj)
+
+    center_valid = 0
+    center_x = -1
+    center_y = -1
+    center_reason = "none"
+    if target_center_result is not None:
+        center_valid = 1 if target_center_result.valid else 0
+        center_x = target_center_result.cx
+        center_y = target_center_result.cy
+        center_reason = target_center_result.reason
+
+    hold_ms = 0
+    if runtime.hold_start_ms >= 0:
+        hold_ms = now - runtime.hold_start_ms
+
+    line = (
+        "TDBG,t=%lu,task=%s,run=%d,sel=%d,state=%s,idx=%d,total=%d,done=%d,timeout=%d,hold=%lu,tx=%d,%d,valid=%d,ctrl=%d,%d,center=%d,%d,%d,%s,stm=%s,va=%d" %
+        (ticks(),
+         task_controller.task_name(),
+         1 if task_controller.running else 0,
+         1 if task_controller.selected else 0,
+         runtime.status,
+         runtime.index,
+         len(runtime.sequence),
+         1 if runtime.done else 0,
+         1 if runtime.timeout else 0,
+         hold_ms,
+         tx_dx,
+         tx_dy,
+         tx_valid,
+         cx,
+         cy,
+         center_valid,
+         center_x,
+         center_y,
+         center_reason,
+         state_name(),
+         stat["vision_active"]))
+    if TASK_DEBUG_CONSOLE_ENABLE:
+        print(line)
+    if TASK_DEBUG_UDP_ENABLE and UDP_DEBUG_ENABLE:
+        udp_debug.send(line)
 
 def filter_objs(objs):
     filtered = []
@@ -699,6 +806,57 @@ def is_laser_hit_obj(obj):
     dy = cy - ay
     return dx * dx + dy * dy <= LASER_MASK_RADIUS * LASER_MASK_RADIUS
 
+def pixel_rgb(pixel):
+    def unpack(value):
+        value = int(value)
+        if value <= 0xff:
+            return value, value, value
+        return (value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff
+
+    if isinstance(pixel, tuple) or isinstance(pixel, list):
+        if len(pixel) >= 3:
+            r = clamp(int(pixel[0]), 0, 255)
+            g = clamp(int(pixel[1]), 0, 255)
+            b = clamp(int(pixel[2]), 0, 255)
+            return r, g, b
+        if len(pixel) == 1:
+            return unpack(pixel[0])
+        return None
+    return unpack(pixel)
+
+def laser_patch_color(img, ax, ay, r):
+    sample_r = r + LASER_INPUT_SAMPLE_PAD
+    points = (
+        (ax - sample_r, ay),
+        (ax + sample_r, ay),
+        (ax, ay - sample_r),
+        (ax, ay + sample_r),
+        (ax - sample_r, ay - sample_r),
+        (ax + sample_r, ay - sample_r),
+        (ax - sample_r, ay + sample_r),
+        (ax + sample_r, ay + sample_r),
+    )
+    count = 0
+    sum_r = 0
+    sum_g = 0
+    sum_b = 0
+    for px, py in points:
+        if px < 0 or px >= PANEL_X or py < 0 or py >= CAMERA_HEIGHT:
+            continue
+        try:
+            rgb = pixel_rgb(img.get_pixel(px, py))
+        except Exception:
+            rgb = None
+        if rgb is None:
+            continue
+        sum_r += rgb[0]
+        sum_g += rgb[1]
+        sum_b += rgb[2]
+        count += 1
+    if count <= 0:
+        return COLOR_WHITE
+    return image.Color.from_rgb(sum_r // count, sum_g // count, sum_b // count)
+
 def mask_laser_for_detector(img):
     if not LASER_INPUT_MASK_ENABLE or not aim_calibrated:
         return img
@@ -712,12 +870,9 @@ def mask_laser_for_detector(img):
     if x2 <= x1 or y2 <= y1:
         return img
 
-    try:
-        detect_img = img.copy()
-    except Exception:
-        detect_img = img
-    detect_img.draw_rect(x1, y1, x2 - x1, y2 - y1, color = COLOR_BLACK, thickness = -1)
-    return detect_img
+    patch_color = laser_patch_color(img, ax, ay, r)
+    img.draw_rect(x1, y1, x2 - x1, y2 - y1, color = patch_color, thickness = -1)
+    return img
 
 def clamp(value, min_value, max_value):
     if value < min_value:
@@ -1033,16 +1188,41 @@ def track_selected_by_maix_blobs(img):
 def is_in_rect(x, y, rect):
     return x >= rect[0] and x < rect[0] + rect[2] and y >= rect[1] and y < rect[1] + rect[3]
 
+def page_task_rect():
+    return [PANEL_X + PANEL_PAD, 10, (PANEL_W - PANEL_PAD * 3) // 2, 36]
+
+def page_calib_rect():
+    x = PANEL_X + PANEL_PAD * 2 + (PANEL_W - PANEL_PAD * 3) // 2
+    return [x, 10, (PANEL_W - PANEL_PAD * 3) // 2, 36]
+
+def task_item_rect(index):
+    return [PANEL_X + PANEL_PAD, 88 + index * 58, PANEL_W - PANEL_PAD * 2, 50]
+
 def candidate_item_rect(index):
-    return [PANEL_X + PANEL_PAD, ITEM_TOP + index * ITEM_H, PANEL_W - PANEL_PAD * 2, ITEM_H - 8]
+    top = 176 if ui_page == UI_PAGE_CALIB else ITEM_TOP
+    return [PANEL_X + PANEL_PAD, top + index * ITEM_H, PANEL_W - PANEL_PAD * 2, ITEM_H - 8]
 
 def calib_button_rect():
-    return [PANEL_X + PANEL_PAD, 10, PANEL_W - PANEL_PAD * 2, 42]
+    return [PANEL_X + PANEL_PAD, 58, PANEL_W - PANEL_PAD * 2, 42]
 
 def clear_button_rect():
-    return [PANEL_X + PANEL_PAD, 56, PANEL_W - PANEL_PAD * 2, 42]
+    return [PANEL_X + PANEL_PAD, 104, PANEL_W - PANEL_PAD * 2, 42]
+
+def calib_status_y():
+    return 152
 
 def select_by_point(x, y, objs):
+    if is_in_rect(x, y, page_task_rect()):
+        return TASK_PAGE_CODE, -1, -1, -1, -1, -1
+    if is_in_rect(x, y, page_calib_rect()):
+        return CALIB_PAGE_CODE, -1, -1, -1, -1, -1
+    if ui_page == UI_PAGE_TASK:
+        if task_controller is not None:
+            for i, task_id in enumerate(task_controller.available_tasks()):
+                if is_in_rect(x, y, task_item_rect(i)):
+                    return TASK_SELECT_CODE, task_id, -1, -1, -1, -1
+        return None, None, None, None, None, None
+
     if is_in_rect(x, y, calib_button_rect()):
         return CALIBRATE_CODE, -1, -1, -1, -1, -1
     if is_in_rect(x, y, clear_button_rect()):
@@ -1480,7 +1660,6 @@ def calibrate_visual_anchor():
         anchor_frozen = False
         anchor_stable_frames = 0
     else:
-        reset_calibration()
         reset_anchor_lock()
     reset_tx_filter()
 
@@ -1514,9 +1693,42 @@ def clear_selection():
     track_ref_yaw = stat["yaw_abs"]
     reset_smooth_box()
     reset_anchor_lock()
-    reset_calibration()
+
+def slot_index_for_class(class_id):
+    for i, slot in enumerate(candidate_slots):
+        if slot["class_id"] == class_id:
+            return i
+    return -1
+
+def select_target_obj(obj, img, reason = "task"):
+    global selected_class_id, selected_cx, selected_cy, selected_w, selected_h, selected_slot_index
+    global track_ref_pitch, track_ref_yaw
+    if obj is None:
+        return False
+
+    cx, cy = obj_center(obj)
+    selected_class_id = obj.class_id
+    selected_cx = cx
+    selected_cy = cy
+    selected_w = obj.w
+    selected_h = obj.h
+    selected_slot_index = slot_index_for_class(obj.class_id)
+    track_ref_pitch = stat["pitch_abs"]
+    track_ref_yaw = stat["yaw_abs"]
+    reset_smooth_box()
+    seed_obj = box_at_center(cx, cy, obj.w, obj.h, obj.class_id, max(obj.score, 0.80))
+    kalman_tracker.init(cx, cy)
+    strong_snap_gate.reset()
+    update_last_yolo_box(seed_obj)
+    update_anchor_lock(cx, cy)
+    smooth_box(seed_obj)
+    dynamic_color_model.learn(img, seed_obj, PANEL_X, CAMERA_HEIGHT)
+    set_vision_state(VSTATE_TRACK, reason)
+    return True
 
 def touch_to_image_pos(x, y, img):
+    if x >= PANEL_X:
+        return int(x), int(y)
     mapped = image.resize_map_pos_reverse(img.width(), img.height(), dis.width(), dis.height(), image.Fit.FIT_CONTAIN, x, y)
     return int(mapped[0]), int(mapped[1])
 
@@ -1524,6 +1736,7 @@ def handle_touch_press(raw_x, raw_y, img, objs):
     global touch_x, touch_y, last_touch_action_ms
     global selected_class_id, selected_cx, selected_cy, selected_w, selected_h, selected_slot_index
     global track_ref_pitch, track_ref_yaw
+    global ui_page
 
     now = time.ticks_ms()
     if now - last_touch_action_ms < TOUCH_DEBOUNCE_MS:
@@ -1535,33 +1748,33 @@ def handle_touch_press(raw_x, raw_y, img, objs):
         return
 
     last_touch_action_ms = now
+    if class_id == TASK_PAGE_CODE:
+        ui_page = UI_PAGE_TASK
+        return
+    if class_id == CALIB_PAGE_CODE:
+        ui_page = UI_PAGE_CALIB
+        return
     if class_id == CALIBRATE_CODE:
         calibrate_visual_anchor()
         return
     if class_id == SELECT_CLEAR_CODE:
         clear_selection()
         return
+    if class_id == TASK_SELECT_CODE:
+        if task_controller is not None:
+            if task_controller.select_task(cx, time.ticks_ms(), stat["state"]):
+                clear_selection()
+                reset_tx_filter()
+                log("task selected -> %s" % task_controller.status_text(display_label))
+            else:
+                log("task select blocked: %s" % task_controller.status_text(display_label))
+        return
     panel_select = touch_x >= PANEL_X
     if selected_class_id >= 0 and vision_track_state != VSTATE_SEARCH and not panel_select:
         return
-
-    selected_class_id = class_id
-    selected_cx = cx
-    selected_cy = cy
-    selected_w = obj_w
-    selected_h = obj_h
-    selected_slot_index = slot_index
-    track_ref_pitch = stat["pitch_abs"]
-    track_ref_yaw = stat["yaw_abs"]
-    reset_smooth_box()
     seed_obj = box_at_center(cx, cy, obj_w, obj_h, class_id, 0.80)
-    kalman_tracker.init(cx, cy)
-    strong_snap_gate.reset()
-    update_last_yolo_box(seed_obj)
-    update_anchor_lock(cx, cy)
-    smooth_box(seed_obj)
-    dynamic_color_model.learn(img, seed_obj, PANEL_X, CAMERA_HEIGHT)
-    set_vision_state(VSTATE_TRACK, "selected")
+    if select_target_obj(seed_obj, img, "selected"):
+        selected_slot_index = slot_index
 
 def draw_label(img, x, y, msg, color):
     text_w = len(msg) * 8 * TEXT_SCALE
@@ -1611,6 +1824,20 @@ def draw_target_crosses(img, target_obj):
         img.draw_circle(px, py, 9, color = COLOR_BLACK, thickness = 3)
         img.draw_circle(px, py, 8, color = COLOR_BLUE, thickness = 2)
 
+def draw_target_center_result(img):
+    if target_center_result is None:
+        return
+    if target_center_result.roi is not None:
+        roi = target_center_result.roi
+        img.draw_rect(roi[0], roi[1], roi[2], roi[3], color = COLOR_YELLOW, thickness = 1)
+    if target_center_result.valid:
+        img.draw_cross(target_center_result.cx, target_center_result.cy, color = COLOR_BLACK, size = 30, thickness = 5)
+        img.draw_cross(target_center_result.cx, target_center_result.cy, color = image.COLOR_GREEN, size = 26, thickness = 3)
+        draw_label(img, target_center_result.cx + 8, target_center_result.cy, "center", image.COLOR_GREEN)
+    else:
+        img.draw_rect(4 * UI_SCALE, 44 * UI_SCALE, 220 * UI_SCALE, 24 * UI_SCALE, color = COLOR_BLACK, thickness = -1)
+        img.draw_string(8 * UI_SCALE, 48 * UI_SCALE, "center:%s" % target_center_result.reason, color = COLOR_LOST, scale = UI_SCALE)
+
 def draw_uart_overlay(img, target_obj):
     if last_tx_packet is None:
         tx_dx = 0
@@ -1636,22 +1863,59 @@ def draw_uart_overlay(img, target_obj):
 def draw_side_panel(img, objs, target_obj, class_id):
     img.draw_rect(PANEL_X, 0, PANEL_W, CAMERA_HEIGHT, color = COLOR_PANEL_BG, thickness = -1)
 
+    task_tab = page_task_rect()
+    calib_tab = page_calib_rect()
+    task_bg = COLOR_ITEM_SELECTED_BG if ui_page == UI_PAGE_TASK else COLOR_BUTTON_BG
+    calib_bg = COLOR_ITEM_SELECTED_BG if ui_page == UI_PAGE_CALIB else COLOR_BUTTON_BG
+    img.draw_rect(task_tab[0], task_tab[1], task_tab[2], task_tab[3], color = task_bg, thickness = -1)
+    img.draw_rect(task_tab[0], task_tab[1], task_tab[2], task_tab[3], color = COLOR_BUTTON_BORDER, thickness = 1)
+    img.draw_string(task_tab[0] + 12, task_tab[1] + 8, "Task", color = COLOR_WHITE, scale = PANEL_TEXT_SCALE)
+    img.draw_rect(calib_tab[0], calib_tab[1], calib_tab[2], calib_tab[3], color = calib_bg, thickness = -1)
+    img.draw_rect(calib_tab[0], calib_tab[1], calib_tab[2], calib_tab[3], color = COLOR_BUTTON_BORDER, thickness = 1)
+    img.draw_string(calib_tab[0] + 12, calib_tab[1] + 8, "Aim", color = COLOR_WHITE, scale = PANEL_TEXT_SCALE)
+
+    if ui_page == UI_PAGE_TASK:
+        status = "MCU:%s  %s" % (state_name(), task_controller.status_text(display_label) if task_controller else "")
+        img.draw_string(PANEL_X + PANEL_PAD, 56, status, color = COLOR_STATUS, scale = UI_SCALE)
+        if task_controller is not None:
+            for i, task_id in enumerate(task_controller.available_tasks()):
+                rect = task_item_rect(i)
+                selected = task_controller.selected and task_controller.task_id == task_id
+                bg = COLOR_ITEM_SELECTED_BG if selected else COLOR_ITEM_BG
+                border = image.COLOR_GREEN if selected else COLOR_ITEM_BORDER
+                name = TASK_NAMES.get(task_id, "Task")
+                if not task_controller.can_select(stat["state"]):
+                    hint = "Need READY, now %s" % state_name()
+                else:
+                    hint = "Tap select"
+                if selected:
+                    hint = "Press USER"
+                img.draw_rect(rect[0], rect[1], rect[2], rect[3], color = bg, thickness = -1)
+                img.draw_rect(rect[0], rect[1], rect[2], rect[3], color = border, thickness = 2)
+                img.draw_string(rect[0] + 10, rect[1] + 7, name, color = COLOR_WHITE, scale = PANEL_TEXT_SCALE)
+                img.draw_string(rect[0] + 10, rect[1] + 31, hint, color = COLOR_DETAIL, scale = UI_SCALE)
+        return
+
     calib_rect = calib_button_rect()
     img.draw_rect(calib_rect[0], calib_rect[1], calib_rect[2], calib_rect[3], color = COLOR_BUTTON_BG, thickness = -1)
     img.draw_rect(calib_rect[0], calib_rect[1], calib_rect[2], calib_rect[3], color = COLOR_BUTTON_BORDER, thickness = 2)
     img.draw_string(calib_rect[0] + 12, calib_rect[1] + 10, "Calibrate", color = COLOR_WHITE, scale = PANEL_TEXT_SCALE)
 
     clear_rect = clear_button_rect()
-    clear_text = "Clear" if class_id >= 0 else "Pick target"
+    clear_text = "Clear Target" if class_id >= 0 else "Pick target"
     img.draw_rect(clear_rect[0], clear_rect[1], clear_rect[2], clear_rect[3], color = COLOR_BUTTON_BG, thickness = -1)
     img.draw_rect(clear_rect[0], clear_rect[1], clear_rect[2], clear_rect[3], color = COLOR_BUTTON_BORDER, thickness = 2)
     img.draw_string(clear_rect[0] + 12, clear_rect[1] + 10, clear_text, color = COLOR_WHITE, scale = PANEL_TEXT_SCALE)
 
-    if class_id >= 0:
+    if task_controller is not None:
+        status = task_controller.status_text(display_label)
+        if target_center_result is not None:
+            status = "%s %s" % (status, target_center_result.reason)
+    elif class_id >= 0:
         status = vision_state_name()
     else:
         status = "Candidates"
-    img.draw_string(PANEL_X + PANEL_PAD, 104, status, color = COLOR_STATUS, scale = PANEL_TEXT_SCALE)
+    img.draw_string(PANEL_X + PANEL_PAD, calib_status_y(), status, color = COLOR_STATUS, scale = PANEL_TEXT_SCALE)
 
     for display_i, slot_i in enumerate(display_slot_indices()):
         slot = candidate_slots[slot_i]
@@ -1725,11 +1989,15 @@ def run():
     global smooth_score
     global yolo_frame_div
     global last_udp_debug_ms, last_console_debug_ms
+    global task_controller, target_center_finder, target_center_result
 
     model_path = resolve_model_path()
     detector = create_detector(model_path)
     validate_detector_labels()
     log("model %s labels=%d input=%dx%d" % (model_path, len(detector.labels), detector.input_width(), detector.input_height()))
+    task_controller = BTaskController(detector.labels)
+    target_center_finder = TargetCenterFinder(BLACK_THRESHOLDS)
+    log("task %s" % task_controller.status_text(display_label))
 
     cam = camera.Camera(CAMERA_WIDTH, CAMERA_HEIGHT, detector.input_format())
     dis = display.Display()
@@ -1747,11 +2015,17 @@ def run():
     objs = []
     raw_objs = []
     track_objs = []
+    task_objs = []
     while not app.need_exit():
         poll_uart()
+        if task_controller is not None:
+            if task_controller.sync_mcu_state(stat["state"], time.ticks_ms()):
+                clear_selection()
+                reset_tx_filter()
 
         img = apply_digital_zoom(cam.read())
         x, y, pressed = ts.read()
+        pressed = bool(pressed)
         if pressed and not touch_last_pressed:
             handle_touch_press(x, y, img, objs)
         touch_last_pressed = pressed
@@ -1772,17 +2046,20 @@ def run():
             detected_objs = filter_objs(raw_objs)
             objs = update_candidate_slots(detected_objs)
             track_objs = filter_track_objs(raw_objs)
+            task_objs = detected_objs
             yolo_fresh = True
         else:
             last_yolo_seen_frames += 1
 
-        x, y, pressed = ts.read()
-        if pressed and not touch_last_pressed:
-            handle_touch_press(x, y, img, objs)
-        touch_last_pressed = pressed
-
         if selected_class_id < 0:
             set_vision_state(VSTATE_SEARCH)
+
+        if task_controller is not None:
+            task_obj = task_controller.pick_target(task_objs if len(task_objs) > 0 else objs,
+                                                  selected_class_id,
+                                                  time.ticks_ms())
+            if task_obj is not None:
+                select_target_obj(task_obj, img, "task")
 
         target_obj = None
         output_valid = False
@@ -1904,15 +2181,66 @@ def run():
         elif selected_class_id >= 0:
             lost_frames += 1
 
+        if (task_controller is not None and
+                task_controller.needs_target_center_refinement() and
+                control_obj is not None and output_valid and
+                target_center_finder is not None):
+            target_center_result = target_center_finder.update(img, control_obj, PANEL_X, CAMERA_HEIGHT)
+            if target_center_result.valid:
+                control_obj = box_at_center(target_center_result.cx,
+                                            target_center_result.cy,
+                                            12,
+                                            12,
+                                            control_obj.class_id,
+                                            control_obj.score)
+                target_objs = [control_obj]
+            elif target_center_result is not None:
+                task_controller.runtime.status = "CENTER " + target_center_result.reason
+        else:
+            target_center_result = None
+
         if len(target_objs) > 0 and report_on:
             body = encode_objs(target_objs)
             p.report(APP_CMD_DETECT_RES, body)
 
-        if control_obj is not None:
-            send_target(control_obj)
-        else:
-            send_target(None)
+        task_tx_offset = None
+        if control_obj is not None and output_valid:
+            if (task_controller is not None and task_controller.running and
+                    task_controller.task_id == 3 and task_controller.runtime.circle_start_ms >= 0):
+                task_tx_offset = target_offset_for_circle(control_obj)
+            else:
+                task_tx_offset = target_offset_for_mcu(control_obj)
+        if task_controller is not None:
+            if task_controller.update_lock(control_obj, output_valid, task_tx_offset, time.ticks_ms()):
+                clear_selection()
+                reset_tx_filter()
+                control_obj = None
+                target_objs = []
+                output_valid = False
+                task_tx_offset = None
+            control_obj = task_controller.override_control_obj(control_obj, output_valid, box_at_center, time.ticks_ms())
+            if control_obj is None and task_controller.runtime.done:
+                output_valid = False
+                task_tx_offset = None
 
+        search_request = (
+            task_controller is not None and
+            task_controller.selected and
+            task_controller.running and
+            not task_controller.runtime.done and
+            control_obj is None)
+        circle_mode = (
+            task_controller is not None and
+            task_controller.running and
+            task_controller.task_id == 3 and
+            task_controller.runtime.circle_start_ms >= 0 and
+            control_obj is not None)
+        if control_obj is not None:
+            send_target(control_obj, False, circle_mode)
+        else:
+            send_target(None, search_request)
+
+        send_task_debug(control_obj, output_valid, task_tx_offset)
         send_debug_status(target_obj, output_valid, debug_yolo_obj, debug_yolo_reason)
 
         if selected_class_id < 0:
@@ -1925,6 +2253,7 @@ def run():
             img.draw_rect(4 * UI_SCALE, 4 * UI_SCALE, 260 * UI_SCALE, 32 * UI_SCALE, color = COLOR_BLACK, thickness = -1)
             img.draw_string(8 * UI_SCALE, 8 * UI_SCALE, vision_state_name(), color = COLOR_LOST, scale = 2 * UI_SCALE)
 
+        draw_target_center_result(img)
         draw_side_panel(img, objs, target_obj, selected_class_id)
         if control_obj is not None:
             draw_uart_overlay(img, control_obj)

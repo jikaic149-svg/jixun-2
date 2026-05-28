@@ -13,9 +13,11 @@ typedef struct {
     uint8_t enabled;   // 使能状态: 1-使能, 0-失能
     float current;     // 实际电流 (A)
     float speed;       // 实际转速 (rpm)
-    float angle;       // 编码器当前单圈角度 (rad), 范围 [0, 2PI]
-    float last_angle;  // 上一次更新的单圈角度 (rad)
-    float total_angle; // 经过 0/360 过零点处理后的连续多圈总角度 (rad)
+    float angle;       // 编码器当前单圈角度 (deg), 范围 [0, 360]
+    float last_angle;  // 上一次更新的单圈角度 (deg)
+    float total_angle; // 当前等价角度 (deg)
+    uint32_t rx_count;
+    uint32_t last_rx_tick;
     uint8_t init_flag; // 初始帧获取标志
 } Motor_Measure_t;
 
@@ -27,5 +29,6 @@ void Motor_Enable(uint8_t id);
 void Motor_Disable(uint8_t id);
 void Motor_SetCurrent(uint8_t id, float current);
 void Motor_SetAngle(uint8_t id, float angle);
+uint8_t Motor_FeedbackReady(const Motor_Measure_t *motor, uint32_t now_tick, uint32_t timeout_ms);
 
 #endif /* __BSP_CAN_H */

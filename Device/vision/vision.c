@@ -99,7 +99,7 @@ static void parse_line(Vision_Instance_t *inst, const uint8_t *line, uint16_t le
     inst->dx = dx;
     inst->dy = dy;
     if (valid >= 0) {
-        inst->valid = valid ? 1U : 0U;
+        inst->valid = valid > 0 ? ((valid > 3) ? 1U : (uint8_t)valid) : 0U;
     } else {
         inst->valid = (dx != 0 || dy != 0) ? 1U : 0U;
     }

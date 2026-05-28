@@ -473,7 +473,10 @@ void INS_Task(void *argument)
 
         /* ======================== 鍏ㄥ眬濮挎€佹洿鏂颁笌钃濈墮杈撳嚭 ======================== */
         // 缂栫爜鍣ㄨ搴?(CAN灞傚凡杞负瑙掑害鍒?0~360掳)
-        float enc_pitch_deg = pitch_control_angle(pitch_motor.angle);
+        uint8_t pitch_feedback_ready = Motor_FeedbackReady(&pitch_motor, now_tick, 100U);
+        float enc_pitch_deg = pitch_feedback_ready ?
+            pitch_control_angle(pitch_motor.angle) :
+            MOTOR_PITCH_MECH_ZERO;
         
         // 浜戝彴鏈€缁?Pitch 鍜?Yaw (IMU + 缂栫爜鍣ㄨ瀺鍚?
         float gimbal_pitch = out_pitch + (enc_pitch_deg - MOTOR_PITCH_MECH_ZERO);
@@ -486,7 +489,12 @@ void INS_Task(void *argument)
 
         vision_raw_dx = Vision_GetDx(&g_vision);
         vision_raw_dy = Vision_GetDy(&g_vision);
-        vision_raw_valid = Vision_IsValid(&g_vision);
+        {
+            uint8_t vis_valid = Vision_IsValid(&g_vision);
+            vision_raw_valid = (vis_valid == 1U || vis_valid == 3U) ? 1U : 0U;
+            vision_raw_search = (vis_valid == 2U) ? 1U : 0U;
+            vision_raw_circle = (vis_valid == 3U) ? 1U : 0U;
+        }
         vision_raw_frame_count = Vision_GetFrameCount(&g_vision);
         vision_raw_frame_seq = Vision_GetFrameSeq(&g_vision);
 

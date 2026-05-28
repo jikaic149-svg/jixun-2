@@ -1,9 +1,29 @@
 #include "bsp_can.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 extern CAN_HandleTypeDef hcan1;
 
 Motor_Measure_t yaw_motor;   // Yaw 电机数据, id = 0x00
 Motor_Measure_t pitch_motor; // Pitch 电机数据, id = 0x01
+
+static int16_t le_i16(const uint8_t *data)
+{
+    return (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
+}
+
+static uint16_t le_u16(const uint8_t *data)
+{
+    return (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
+}
+
+static uint32_t motor_feedback_tick_from_isr(void)
+{
+    if (xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED) {
+        return HAL_GetTick();
+    }
+    return (uint32_t)xTaskGetTickCountFromISR();
+}
 
 /**
   * @brief  CAN1 滤波器配置与启动
@@ -101,6 +121,17 @@ void Motor_SetAngle(uint8_t id, float angle) {
     CAN_SendCommand(id, 0x05, (int16_t)value);
 }
 
+uint8_t Motor_FeedbackReady(const Motor_Measure_t *motor, uint32_t now_tick, uint32_t timeout_ms)
+{
+    if (motor == NULL || motor->init_flag == 0U) {
+        return 0U;
+    }
+    if ((now_tick - motor->last_rx_tick) > timeout_ms) {
+        return 0U;
+    }
+    return 1U;
+}
+
 /**
   * @brief  CAN 接收回调函数（在此处回传并解析编码器数值）
   * @param  hcan: CAN 句柄
@@ -120,15 +151,16 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
                 motor = &pitch_motor;
             }
             
-            if (motor != NULL) {
-                // 完全参考 QGimbal 的方式，直接使用指针强转，抛弃复杂的累加处理
+            if (motor != NULL && rx_header.DLC >= 8U) {
+                motor->last_angle = motor->angle;
                 motor->enabled = rx_data[0] & 0x01;
-                motor->current = *(int16_t *)(rx_data + 2) * 10.0f / 32767.0f;
-                motor->speed   = *(int16_t *)(rx_data + 4) * 1000.0f / 32767.0f;
-                motor->angle   = *(uint16_t *)(rx_data + 6) * 360.0f / 65535.0f;  // 直接输出角度制 (0~360°)
-                
-                // 强制将 total_angle 设为直接等价，不需要自行累加了！
+                motor->current = le_i16(rx_data + 2) * 10.0f / 32767.0f;
+                motor->speed   = le_i16(rx_data + 4) * 1000.0f / 32767.0f;
+                motor->angle   = le_u16(rx_data + 6) * 360.0f / 65535.0f;
                 motor->total_angle = motor->angle;
+                motor->rx_count++;
+                motor->last_rx_tick = motor_feedback_tick_from_isr();
+                motor->init_flag = 1U;
             }
         }
     }

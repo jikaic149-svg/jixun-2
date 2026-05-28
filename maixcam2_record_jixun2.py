@@ -17,10 +17,10 @@ PREVIEW_SECONDS = 5
 PREVIEW_EVERY_FRAMES = 3
 END_NOTICE_SECONDS = 4
 PREFIX = "jixun2_yolo"
-DIGITAL_ZOOM_SCALE = 1.60
+DIGITAL_ZOOM_SCALE = 1.00
 DIGITAL_ZOOM_CENTER_X = 0.50
 DIGITAL_ZOOM_CENTER_Y = 0.50
-CAPTURE_FORMAT = "auto"
+CAPTURE_FORMAT = "yvu"
 PREVIEW_ONLY = False
 
 
@@ -53,15 +53,15 @@ def parse_args():
             print("  python maixcam2_record_jixun2.py [--duration=120] [--width=1280] [--height=720]")
             print("                                      [--out-dir=/root/videos] [--preview=1]")
             print("                                      [--preview-seconds=5] [--prefix=jixun2_yolo]")
-            print("                                      [--zoom=1.60] [--zoom-x=0.50] [--zoom-y=0.50]")
+            print("                                      [--zoom=1.00] [--zoom-x=0.50] [--zoom-y=0.50]")
             print("                                      [--capture-format=auto|rgb|yvu]")
             print("                                      [--preview-only=0|1]")
             print("")
             print("Notes:")
             print("  duration=0 records until app exit / KEY_OK.")
             print("  1280x720 is the validated MaixCam2 capture size for this workflow.")
-            print("  zoom crops around normalized anchor (zoom-x, zoom-y), then resizes back.")
-            print("  YVU420SP cannot crop on this device; zoom capture uses RGB888.")
+            print("  Record with --zoom=1.0 --capture-format=yvu for clean encoder input.")
+            print("  Do not record RGB888 zoom frames; they can decode as purple/striped video.")
             app.set_exit_flag(True)
             return None
         if arg.startswith("--duration="):
@@ -142,8 +142,6 @@ def resolve_capture_format(zoom, capture_format):
         return image.Format.FMT_RGB888, "RGB888"
     if capture_format == "yvu":
         return image.Format.FMT_YVU420SP, "YVU420SP"
-    if zoom > 1.01:
-        return image.Format.FMT_RGB888, "RGB888"
     return image.Format.FMT_YVU420SP, "YVU420SP"
 
 
@@ -182,8 +180,9 @@ def main():
 
     capture_fmt, capture_fmt_name = resolve_capture_format(cfg["zoom"], cfg["capture_format"])
     print("Capture format:", capture_fmt_name)
-    if cfg["zoom"] > 1.01 and capture_fmt_name == "YVU420SP":
-        print("ERROR: YVU420SP does not support crop/resize on this device. Use --capture-format=rgb or --zoom=1.0")
+    if cfg["zoom"] > 1.01 and not cfg["preview_only"]:
+        print("ERROR: Recording with digital zoom uses RGB/crop frames and can produce purple/striped encoded video.")
+        print("Use --zoom=1.0 for dataset recording. Move the camera closer instead.")
         app.set_exit_flag(True)
         return
 

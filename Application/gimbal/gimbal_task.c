@@ -7,6 +7,8 @@
 #include "MODE_GRAVITY_CALIB.h"
 #include "gimbal_mode_scheduler.h"
 
+#define MOTOR_FEEDBACK_TIMEOUT_MS 100U
+
 volatile GimbalState_e gimbal_state = GIMBAL_STATE_IDLE;
 float ext_target_yaw = 0.0f;
 uint8_t flag_ext_yaw = 0;
@@ -15,6 +17,8 @@ volatile uint8_t gimbal_stab_target_reset = 1U;
 volatile int16_t vision_raw_dx = 0;
 volatile int16_t vision_raw_dy = 0;
 volatile uint8_t vision_raw_valid = 0;
+volatile uint8_t vision_raw_search = 0;
+volatile uint8_t vision_raw_circle = 0;
 volatile uint32_t vision_raw_frame_count = 0;
 volatile uint32_t vision_raw_frame_seq = 0;
 
@@ -33,9 +37,11 @@ static float pitch_control_angle(float enc_deg)
 
 static void apply_pitch_gravity_feedforward(GimbalModeOutput_t *out)
 {
+    uint32_t now_tick = (uint32_t)xTaskGetTickCount();
     if (gimbal_state == GIMBAL_STATE_IDLE ||
         gimbal_state == GIMBAL_STATE_RELAX ||
-        emergency_stop) {
+        emergency_stop ||
+        !Motor_FeedbackReady(&pitch_motor, now_tick, MOTOR_FEEDBACK_TIMEOUT_MS)) {
         return;
     }
 
@@ -90,9 +96,13 @@ static void update_state_led(GimbalState_e state)
 
 static void apply_output_safety(GimbalModeOutput_t *out)
 {
+    uint32_t now_tick = (uint32_t)xTaskGetTickCount();
+
     if (gimbal_state == GIMBAL_STATE_IDLE ||
         gimbal_state == GIMBAL_STATE_RELAX ||
-        emergency_stop) {
+        emergency_stop ||
+        !Motor_FeedbackReady(&pitch_motor, now_tick, MOTOR_FEEDBACK_TIMEOUT_MS) ||
+        !Motor_FeedbackReady(&yaw_motor, now_tick, MOTOR_FEEDBACK_TIMEOUT_MS)) {
         out->pitch_current = 0.0f;
         out->yaw_current = 0.0f;
         return;
