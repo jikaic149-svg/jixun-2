@@ -491,9 +491,20 @@ void INS_Task(void *argument)
         vision_raw_dy = Vision_GetDy(&g_vision);
         {
             uint8_t vis_valid = Vision_IsValid(&g_vision);
-            vision_raw_valid = (vis_valid == 1U || vis_valid == 3U) ? 1U : 0U;
-            vision_raw_search = (vis_valid == 2U) ? 1U : 0U;
-            vision_raw_circle = (vis_valid == 3U) ? 1U : 0U;
+            if (vis_valid == 4U) {
+                vision_raw_valid = 0U;
+                vision_raw_search = 0U;
+                vision_raw_circle = 0U;
+                vision_raw_dx = 0;
+                vision_raw_dy = 0;
+                gimbal_state = GIMBAL_STATE_IDLE;
+                gimbal_stab_target_reset = 1U;
+            } else {
+                vision_raw_valid = (vis_valid == 1U || vis_valid == 3U ||
+                                    vis_valid == 5U || vis_valid == 6U) ? 1U : 0U;
+                vision_raw_search = (vis_valid == 2U) ? 1U : 0U;
+                vision_raw_circle = (vis_valid == 3U || vis_valid == 6U) ? 1U : 0U;
+            }
         }
         vision_raw_frame_count = Vision_GetFrameCount(&g_vision);
         vision_raw_frame_seq = Vision_GetFrameSeq(&g_vision);
@@ -508,8 +519,8 @@ void INS_Task(void *argument)
             uint32_t vis_frame_seq = Vision_GetFrameSeq(&g_vision);
 
             uint32_t now_ms = (uint32_t)xTaskGetTickCount();
-            static char vision_tx_buf[180];
-            sprintf(vision_tx_buf, "M,STAT,%lu,%u,%d,%d,%u,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%u,%.3f,%.3f\r\n",
+            static char vision_tx_buf[240];
+            sprintf(vision_tx_buf, "M,STAT,%lu,%u,%d,%d,%u,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%u,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%lu\r\n",
                     now_ms,
                     (unsigned)gimbal_state,
                     vis_dx,
@@ -523,7 +534,12 @@ void INS_Task(void *argument)
                     yaw_motor.current,
                     (unsigned)MODE_VISION_STAB_GetVisionActive(),
                     MODE_VISION_STAB_GetVisionPitchOffset(),
-                    MODE_VISION_STAB_GetVisionYawOffset());
+                    MODE_VISION_STAB_GetVisionYawOffset(),
+                    MODE_VISION_STAB_GetVisionInputDx(),
+                    MODE_VISION_STAB_GetVisionInputDy(),
+                    MODE_VISION_STAB_GetVisionPredictDx(),
+                    MODE_VISION_STAB_GetVisionPredictDy(),
+                    MODE_VISION_STAB_GetVisionPredictMs());
             Vision_Send(&g_vision, (const uint8_t *)vision_tx_buf, strlen(vision_tx_buf));
         }
 

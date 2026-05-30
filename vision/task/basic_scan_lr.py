@@ -1,4 +1,4 @@
-from .base import BaseTask, best_obj_for_class, is_locked, visible_objects_left_to_right
+from .base import BaseTask, best_obj_for_class, is_scan_locked, visible_objects_left_to_right
 from .constants import BASIC_SCAN_LIMIT_MS, TARGET_HOLD_MS
 
 
@@ -42,7 +42,7 @@ class BasicScanLeftRightTask(BaseTask):
             return
         if runtime.done or runtime.index >= len(runtime.sequence):
             return
-        if is_locked(output_valid, tx_offset):
+        if is_scan_locked(output_valid, tx_offset):
             if runtime.hold_start_ms < 0:
                 runtime.hold_start_ms = now_ms
             elapsed = now_ms - runtime.hold_start_ms

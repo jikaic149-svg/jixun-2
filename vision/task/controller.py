@@ -1,4 +1,4 @@
-from .base import TaskRuntime, resolve_target_ids
+from .base import TaskRuntime, resolve_center_target_ids, resolve_scan_target_ids
 from .basic_center import BasicCenterTask
 from .basic_scan_lr import BasicScanLeftRightTask
 from .basic_reaim_center import BasicReaimCenterTask
@@ -9,6 +9,7 @@ from .constants import (
     MCU_READY_STATES,
     MCU_SELECTABLE_STATES,
     MCU_RUN_TRIGGER_STATES,
+    TASK_ALLOW_ANY_MCU_STATE,
     TASK_BASIC_CENTER,
     TASK_BASIC_REAIM_CENTER,
     TASK_BASIC_SCAN_LR,
@@ -23,7 +24,9 @@ from .constants import (
 class BTaskController:
     def __init__(self, labels):
         self.labels = labels
-        self.target_class_ids = resolve_target_ids(labels)
+        self.center_target_class_ids = resolve_center_target_ids(labels)
+        self.scan_target_class_ids = resolve_scan_target_ids(labels)
+        self.target_class_ids = self.center_target_class_ids
         self.memory_order = []
         self.task_id = TASK_BASIC_CENTER
         self.selected = False
@@ -31,11 +34,11 @@ class BTaskController:
         self.last_mcu_state = MCU_STATE_RELAX
         self.runtime = TaskRuntime()
         self.tasks = {
-            TASK_BASIC_CENTER: BasicCenterTask(labels, self.target_class_ids),
-            TASK_BASIC_SCAN_LR: BasicScanLeftRightTask(labels, self.target_class_ids),
-            TASK_BASIC_REAIM_CENTER: BasicReaimCenterTask(labels, self.target_class_ids),
-            TASK_EXT_CIRCLE: ExtCircleTask(labels, self.target_class_ids),
-            TASK_EXT_MEMORY_SCAN: ExtMemoryScanTask(labels, self.target_class_ids),
+            TASK_BASIC_CENTER: BasicCenterTask(labels, self.center_target_class_ids),
+            TASK_BASIC_SCAN_LR: BasicScanLeftRightTask(labels, self.scan_target_class_ids),
+            TASK_BASIC_REAIM_CENTER: BasicReaimCenterTask(labels, self.center_target_class_ids),
+            TASK_EXT_CIRCLE: ExtCircleTask(labels, self.center_target_class_ids),
+            TASK_EXT_MEMORY_SCAN: ExtMemoryScanTask(labels, self.scan_target_class_ids),
         }
         self.runtime.reset(-1)
 
@@ -43,7 +46,7 @@ class BTaskController:
         return TASK_ORDER
 
     def can_select(self, mcu_state):
-        return mcu_state in MCU_SELECTABLE_STATES
+        return TASK_ALLOW_ANY_MCU_STATE or mcu_state in MCU_SELECTABLE_STATES
 
     def is_ready_state(self, mcu_state):
         return mcu_state in MCU_READY_STATES
@@ -58,10 +61,8 @@ class BTaskController:
         return self.selected and self.running and self.task_id in TASK_CENTER_REFINEMENT_TASKS
 
     def select_task(self, task_id, now_ms, mcu_state):
-        if not self.can_select(mcu_state):
-            self.runtime.status = "MCU NOT READY"
-            return False
         self.task_id = task_id
+        self.target_class_ids = self.current_task().target_class_ids
         self.selected = True
         self.running = False
         self.runtime.reset(-1)
@@ -80,11 +81,11 @@ class BTaskController:
             self.running = False
             return False
         if self.running:
-            if self.is_ready_state(mcu_state):
+            if self.is_ready_state(mcu_state) and not TASK_ALLOW_ANY_MCU_STATE:
                 self.running = False
                 self.runtime.status = "STOPPED"
             return False
-        if mcu_state in MCU_RUN_TRIGGER_STATES:
+        if TASK_ALLOW_ANY_MCU_STATE or mcu_state in MCU_RUN_TRIGGER_STATES:
             if self.task_id == TASK_EXT_MEMORY_SCAN and len(self.memory_order) == 0:
                 self.runtime.status = "NO MEMORY"
                 return False
@@ -98,13 +99,24 @@ class BTaskController:
             self.runtime.status = "WAIT STAB"
         return False
 
-    def pick_target(self, detections, selected_class_id, now_ms):
+    def pick_target(self, detections, selected_class_id, now_ms, selected_cx=-1, selected_cy=-1):
         if not self.selected or not self.running:
             return None
         if self.runtime.done:
             self.running = False
             return None
-        obj = self.current_task().pick_target(self.runtime, detections, selected_class_id, now_ms)
+        task = self.current_task()
+        if hasattr(task, "pick_target_with_position"):
+            obj = task.pick_target_with_position(
+                self.runtime,
+                detections,
+                selected_class_id,
+                selected_cx,
+                selected_cy,
+                now_ms,
+            )
+        else:
+            obj = task.pick_target(self.runtime, detections, selected_class_id, now_ms)
         if self.task_id == TASK_BASIC_SCAN_LR and len(self.runtime.sequence) > 0:
             self.memory_order = list(self.runtime.sequence)
             self.tasks[TASK_EXT_MEMORY_SCAN].memory_order = list(self.memory_order)
@@ -127,7 +139,7 @@ class BTaskController:
             self.running = False
         return advance_requested
 
-    def override_control_obj(self, control_obj, output_valid, box_factory, now_ms):
+    def override_control_obj(self, control_obj, output_valid, box_factory, now_ms, tx_offset=None, offset_fn=None):
         if self.runtime.done:
             self.running = False
             return None
@@ -139,6 +151,8 @@ class BTaskController:
             output_valid,
             box_factory,
             now_ms,
+            tx_offset,
+            offset_fn,
         )
 
     def status_text(self, label_fn=None):

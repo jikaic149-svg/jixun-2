@@ -1,4 +1,4 @@
-[basic]
+﻿[basic]
 type = axmodel
 model_npu = jixun2_npu.axmodel
 model_vnpu = jixun2_vnpu.axmodel

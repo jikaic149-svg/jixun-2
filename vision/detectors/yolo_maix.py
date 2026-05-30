@@ -16,6 +16,11 @@ class YoloMaixDetector:
             self.config.model_file,
             "./" + self.config.model_file,
             "/root/models/%s/%s" % (self.config.model_name, self.config.model_file),
+            "/root/models/jixun2/%s" % self.config.model_file,
+            "jixun2.mud",
+            "./jixun2.mud",
+            "/root/models/jixun2/jixun2.mud",
+            "/root/models/maixhub/277595/jixun2.mud",
         ]
         for path in candidates:
             if os.path.exists(path):

@@ -1,6 +1,6 @@
 class VisionConfig:
-    model_name = "jixun2"
-    model_file = "jixun2.mud"
+    model_name = "jixun2_final_manual25_banana_laser_20260529"
+    model_file = "jixun2_final_manual25_banana_laser_20260529.mud"
     expected_labels = (
         "apple",
         "banana",

@@ -21,6 +21,18 @@ static uint32_t vision_loop_ms = 0U;
 static uint32_t vision_control_div_ms = 0U;
 static int16_t vision_sample_dx = 0;
 static int16_t vision_sample_dy = 0;
+static float vision_filtered_dx = 0.0f;
+static float vision_filtered_dy = 0.0f;
+static float vision_meas_dx = 0.0f;
+static float vision_meas_dy = 0.0f;
+static float vision_meas_vx = 0.0f;
+static float vision_meas_vy = 0.0f;
+static uint32_t vision_prev_update_ms = 0U;
+static float vision_control_dx = 0.0f;
+static float vision_control_dy = 0.0f;
+static float vision_predict_dx = 0.0f;
+static float vision_predict_dy = 0.0f;
+static uint32_t vision_predict_ms = 0U;
 static uint8_t vision_sample_valid = 0U;
 static uint8_t vision_sample_circle = 0U;
 static uint8_t vision_active_flag = 0U;
@@ -113,6 +125,18 @@ static void reset_to_current(void)
     vision_control_div_ms = 0U;
     vision_sample_dx = 0;
     vision_sample_dy = 0;
+    vision_filtered_dx = 0.0f;
+    vision_filtered_dy = 0.0f;
+    vision_meas_dx = 0.0f;
+    vision_meas_dy = 0.0f;
+    vision_meas_vx = 0.0f;
+    vision_meas_vy = 0.0f;
+    vision_prev_update_ms = 0U;
+    vision_control_dx = 0.0f;
+    vision_control_dy = 0.0f;
+    vision_predict_dx = 0.0f;
+    vision_predict_dy = 0.0f;
+    vision_predict_ms = 0U;
     vision_sample_valid = 0U;
     vision_sample_circle = 0U;
     vision_active_flag = 0U;
@@ -187,6 +211,18 @@ void MODE_VISION_STAB_ResetTarget(void)
     vision_control_div_ms = 0U;
     vision_sample_dx = 0;
     vision_sample_dy = 0;
+    vision_filtered_dx = 0.0f;
+    vision_filtered_dy = 0.0f;
+    vision_meas_dx = 0.0f;
+    vision_meas_dy = 0.0f;
+    vision_meas_vx = 0.0f;
+    vision_meas_vy = 0.0f;
+    vision_prev_update_ms = 0U;
+    vision_control_dx = 0.0f;
+    vision_control_dy = 0.0f;
+    vision_predict_dx = 0.0f;
+    vision_predict_dy = 0.0f;
+    vision_predict_ms = 0U;
     vision_sample_valid = 0U;
     vision_sample_circle = 0U;
     vision_active_flag = 0U;
@@ -210,6 +246,31 @@ float MODE_VISION_STAB_GetVisionPitchOffset(void)
 float MODE_VISION_STAB_GetVisionYawOffset(void)
 {
     return vision_yaw_offset;
+}
+
+float MODE_VISION_STAB_GetVisionInputDx(void)
+{
+    return vision_control_dx;
+}
+
+float MODE_VISION_STAB_GetVisionInputDy(void)
+{
+    return vision_control_dy;
+}
+
+float MODE_VISION_STAB_GetVisionPredictDx(void)
+{
+    return vision_predict_dx;
+}
+
+float MODE_VISION_STAB_GetVisionPredictDy(void)
+{
+    return vision_predict_dy;
+}
+
+uint32_t MODE_VISION_STAB_GetVisionPredictMs(void)
+{
+    return vision_predict_ms;
 }
 
 void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
@@ -236,6 +297,8 @@ void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
         float vision_err_y = 0.0f;
         float vision_i_err_x = 0.0f;
         float vision_i_err_y = 0.0f;
+        float vision_input_dx = 0.0f;
+        float vision_input_dy = 0.0f;
         float yaw_pid = 0.0f;
         float pitch_pid = 0.0f;
         float yaw_kp = VISION_YAW_PID_KP_DEG_PER_PIXEL;
@@ -261,20 +324,59 @@ void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
         if (vision_raw_frame_seq != vision_last_frame_seq) {
             vision_last_frame_seq = vision_raw_frame_seq;
             if (vision_raw_valid) {
+                uint32_t dt_update_ms;
+                float dt_s;
+                float raw_dx_f;
+                float raw_dy_f;
                 vision_last_update_ms = vision_loop_ms;
+                dt_update_ms = vision_prev_update_ms > 0U ?
+                               (vision_last_update_ms - vision_prev_update_ms) :
+                               0U;
+                raw_dx_f = (float)vision_raw_dx;
+                raw_dy_f = (float)vision_raw_dy;
                 vision_sample_dx = vision_raw_dx;
                 vision_sample_dy = vision_raw_dy;
                 if (vision_sample_circle != vision_raw_circle) {
                     reset_vision_filter();
+                    vision_filtered_dx = raw_dx_f;
+                    vision_filtered_dy = raw_dy_f;
+                    vision_meas_vx = 0.0f;
+                    vision_meas_vy = 0.0f;
+                } else if (vision_raw_circle && dt_update_ms > 0U) {
+                    dt_s = (float)dt_update_ms * 0.001f;
+                    vision_meas_vx = (raw_dx_f - vision_meas_dx) / dt_s;
+                    vision_meas_vy = (raw_dy_f - vision_meas_dy) / dt_s;
+                    vision_meas_vx = clamp_float(vision_meas_vx,
+                                                 -VISION_CIRCLE_OUTPUT_MAX_SPEED_PX_S,
+                                                 VISION_CIRCLE_OUTPUT_MAX_SPEED_PX_S);
+                    vision_meas_vy = clamp_float(vision_meas_vy,
+                                                 -VISION_CIRCLE_OUTPUT_MAX_SPEED_PX_S,
+                                                 VISION_CIRCLE_OUTPUT_MAX_SPEED_PX_S);
                 }
+                vision_meas_dx = raw_dx_f;
+                vision_meas_dy = raw_dy_f;
+                vision_prev_update_ms = vision_last_update_ms;
                 vision_sample_circle = vision_raw_circle;
                 vision_sample_valid = 1U;
                 vision_last_search_ms = 0U;
                 vision_search_requested = 0U;
                 reset_search_scan();
             } else {
+                uint8_t was_circle = vision_sample_circle;
                 vision_sample_dx = 0;
                 vision_sample_dy = 0;
+                vision_filtered_dx = 0.0f;
+                vision_filtered_dy = 0.0f;
+                vision_meas_dx = 0.0f;
+                vision_meas_dy = 0.0f;
+                vision_meas_vx = 0.0f;
+                vision_meas_vy = 0.0f;
+                vision_prev_update_ms = 0U;
+                vision_control_dx = 0.0f;
+                vision_control_dy = 0.0f;
+                vision_predict_dx = 0.0f;
+                vision_predict_dy = 0.0f;
+                vision_predict_ms = 0U;
                 vision_sample_valid = 0U;
                 vision_sample_circle = 0U;
                 if (vision_raw_search) {
@@ -286,6 +388,16 @@ void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
                     reset_search_scan();
                 }
                 reset_vision_filter();
+                if (was_circle && !vision_raw_search) {
+                    target_pitch = clamp_float(global_gimbal_pitch,
+                                               PITCH_SOFT_LIMIT_MIN_DEG,
+                                               PITCH_SOFT_LIMIT_MAX_DEG);
+                    target_yaw = wrap_0_360(global_gimbal_yaw);
+                    vision_base_pitch = target_pitch;
+                    vision_base_yaw = target_yaw;
+                    vision_pitch_offset = 0.0f;
+                    vision_yaw_offset = 0.0f;
+                }
             }
         }
 
@@ -310,23 +422,67 @@ void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
                     pitch_i_max = VISION_CIRCLE_PITCH_PID_I_MAX_DEG;
                     pitch_max_step = VISION_CIRCLE_PITCH_TRACK_MAX_STEP_DEG;
                 }
+                if (vision_sample_circle) {
+                    vision_input_dx = (float)vision_sample_dx;
+                    vision_input_dy = (float)vision_sample_dy;
+                    vision_predict_dx = 0.0f;
+                    vision_predict_dy = 0.0f;
+                    vision_predict_ms = 0U;
+#if VISION_CIRCLE_PREDICT_ENABLE
+                    {
+                        uint32_t predict_ms = vision_loop_ms - vision_last_update_ms;
+                        float predict_s;
+                        float predict_dx;
+                        float predict_dy;
+                        if (predict_ms > VISION_CIRCLE_PREDICT_MAX_MS) {
+                            predict_ms = VISION_CIRCLE_PREDICT_MAX_MS;
+                        }
+                        vision_predict_ms = predict_ms;
+                        predict_s = (float)predict_ms * 0.001f;
+                        predict_dx = clamp_float(vision_meas_vx * predict_s *
+                                                 VISION_CIRCLE_PREDICT_GAIN,
+                                                 -VISION_CIRCLE_PREDICT_MAX_PX,
+                                                 VISION_CIRCLE_PREDICT_MAX_PX);
+                        predict_dy = clamp_float(vision_meas_vy * predict_s *
+                                                 VISION_CIRCLE_PREDICT_GAIN,
+                                                 -VISION_CIRCLE_PREDICT_MAX_PX,
+                                                 VISION_CIRCLE_PREDICT_MAX_PX);
+                        vision_predict_dx = predict_dx;
+                        vision_predict_dy = predict_dy;
+                        vision_input_dx += predict_dx;
+                        vision_input_dy += predict_dy;
+                    }
+#endif
+                    vision_filtered_dx += (vision_input_dx - vision_filtered_dx) *
+                                          VISION_CIRCLE_INPUT_FILTER_ALPHA;
+                    vision_filtered_dy += (vision_input_dy - vision_filtered_dy) *
+                                          VISION_CIRCLE_INPUT_FILTER_ALPHA;
+                } else {
+                    vision_predict_dx = 0.0f;
+                    vision_predict_dy = 0.0f;
+                    vision_predict_ms = 0U;
+                    vision_filtered_dx = (float)vision_sample_dx;
+                    vision_filtered_dy = (float)vision_sample_dy;
+                }
+                vision_control_dx = vision_filtered_dx;
+                vision_control_dy = vision_filtered_dy;
                 vision_err_x = apply_pixel_deadband(
-                    clamp_float((float)vision_sample_dx,
+                    clamp_float(vision_filtered_dx,
                                 -(float)VISION_INPUT_MAX_DX,
                                 (float)VISION_INPUT_MAX_DX),
                     VISION_INPUT_DEADBAND_X);
                 vision_err_y = apply_pixel_deadband(
-                    clamp_float((float)vision_sample_dy,
+                    clamp_float(vision_filtered_dy,
                                 -(float)VISION_INPUT_MAX_DY,
                                 (float)VISION_INPUT_MAX_DY),
                     VISION_INPUT_DEADBAND_Y);
                 vision_i_err_x = apply_pixel_deadband(
-                    clamp_float((float)vision_sample_dx,
+                    clamp_float(vision_filtered_dx,
                                 -(float)VISION_INPUT_MAX_DX,
                                 (float)VISION_INPUT_MAX_DX),
                     VISION_INTEGRAL_DEADBAND_X);
                 vision_i_err_y = apply_pixel_deadband(
-                    clamp_float((float)vision_sample_dy,
+                    clamp_float(vision_filtered_dy,
                                 -(float)VISION_INPUT_MAX_DY,
                                 (float)VISION_INPUT_MAX_DY),
                     VISION_INTEGRAL_DEADBAND_Y);
@@ -396,11 +552,36 @@ void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
                 if (vision_sample_valid &&
                     vision_last_update_ms > 0U &&
                     (vision_loop_ms - vision_last_update_ms) > VISION_INPUT_TIMEOUT_MS) {
+                    uint8_t was_circle = vision_sample_circle;
                     vision_sample_valid = 0U;
                     reset_vision_filter();
+                    if (was_circle) {
+                        target_pitch = clamp_float(global_gimbal_pitch,
+                                                   PITCH_SOFT_LIMIT_MIN_DEG,
+                                                   PITCH_SOFT_LIMIT_MAX_DEG);
+                        target_yaw = wrap_0_360(global_gimbal_yaw);
+                        vision_base_pitch = target_pitch;
+                        vision_base_yaw = target_yaw;
+                        vision_pitch_offset = 0.0f;
+                        vision_yaw_offset = 0.0f;
+                    }
                 }
                 if (should_run_search_scan()) {
                     update_search_scan();
+                } else {
+                    target_pitch = clamp_float(global_gimbal_pitch,
+                                               PITCH_SOFT_LIMIT_MIN_DEG,
+                                               PITCH_SOFT_LIMIT_MAX_DEG);
+                    target_yaw = wrap_0_360(global_gimbal_yaw);
+                    vision_base_pitch = target_pitch;
+                    vision_base_yaw = target_yaw;
+                    vision_pitch_offset = 0.0f;
+                    vision_yaw_offset = 0.0f;
+                    vision_control_dx = 0.0f;
+                    vision_control_dy = 0.0f;
+                    vision_predict_dx = 0.0f;
+                    vision_predict_dy = 0.0f;
+                    vision_predict_ms = 0U;
                 }
             }
         }
