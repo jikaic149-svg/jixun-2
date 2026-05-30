@@ -16,6 +16,7 @@ from .constants import (
     CIRCLE_TRACE_CENTER_MAX_STEP,
     CIRCLE_TRACE_RADIUS_MAX_STEP,
     CIRCLE_PHASE_FULL_SPEED_ERR,
+    CIRCLE_PHASE_MIN_SPEED_SCALE,
     CIRCLE_PHASE_SPEED_ALPHA,
     CIRCLE_PHASE_STOP_ERR,
 )
@@ -36,17 +37,30 @@ class ExtCircleTask(BasicCenterTask):
     def _trace_geometry(self, runtime, control_obj):
         if runtime.circle_center_cx < 0 or runtime.circle_center_cy < 0:
             return None
-        base_w = max(1, getattr(runtime, "circle_target_w", control_obj.w))
-        base_h = max(1, getattr(runtime, "circle_target_h", control_obj.h))
-        box_radius = max(base_w, base_h) * 0.5
         target_r = getattr(runtime, "circle_target_r", -1)
-        if target_r > 0 and target_r >= box_radius * 0.65:
-            source_radius = float(target_r)
+        target_w = getattr(runtime, "circle_target_w", -1)
+        target_h = getattr(runtime, "circle_target_h", -1)
+        base_w = target_w if target_w > 0 else -1
+        base_h = target_h if target_h > 0 else -1
+        if base_w <= 0 and target_r > 0:
+            base_w = target_r * 2
+        if base_h <= 0 and target_r > 0:
+            base_h = target_r * 2
+        if base_w <= 0 and control_obj is not None:
+            base_w = control_obj.w
+        if base_h <= 0 and control_obj is not None:
+            base_h = control_obj.h
+        if base_w > 0 and base_h > 0:
+            source_rx = float(base_w) * 0.5
+            source_ry = float(base_h) * 0.5
+        elif control_obj is not None:
+            source_rx = float(max(1, control_obj.w)) * 0.5
+            source_ry = float(max(1, control_obj.h)) * 0.5
         else:
-            source_radius = box_radius
-        trace_radius = max(source_radius * CIRCLE_RADIUS_SCALE, float(CIRCLE_MIN_RADIUS))
-        target_rx = trace_radius
-        target_ry = trace_radius
+            source_rx = float(CIRCLE_MIN_RADIUS)
+            source_ry = float(CIRCLE_MIN_RADIUS)
+        target_rx = max(source_rx * CIRCLE_RADIUS_SCALE, float(CIRCLE_MIN_RADIUS))
+        target_ry = max(source_ry * CIRCLE_RADIUS_SCALE, float(CIRCLE_MIN_RADIUS))
 
         if runtime.circle_trace_cx < 0 or runtime.circle_trace_cy < 0:
             runtime.circle_trace_cx = float(runtime.circle_center_cx)
@@ -120,27 +134,36 @@ class ExtCircleTask(BasicCenterTask):
         py = int(cy + math.sin(phase) * radius_y + 0.5)
         return px, py
 
-    def _phase_speed_scale(self, runtime, output_valid, tx_offset):
-        target_scale = 0.0
+    def _phase_speed_scale(self, runtime, output_valid, tx_offset, now_ms):
+        target_scale = CIRCLE_PHASE_MIN_SPEED_SCALE
         if output_valid and tx_offset is not None:
             dx, dy = tx_offset
             err = max(abs(dx), abs(dy))
             if err <= CIRCLE_PHASE_FULL_SPEED_ERR:
                 target_scale = 1.0
+                runtime.circle_phase_bad_err_start_ms = -1
             elif err < CIRCLE_PHASE_STOP_ERR:
                 span = max(1.0, float(CIRCLE_PHASE_STOP_ERR - CIRCLE_PHASE_FULL_SPEED_ERR))
-                target_scale = float(CIRCLE_PHASE_STOP_ERR - err) / span
+                target_scale = max(
+                    CIRCLE_PHASE_MIN_SPEED_SCALE,
+                    float(CIRCLE_PHASE_STOP_ERR - err) / span,
+                )
+                runtime.circle_phase_bad_err_start_ms = -1
+            else:
+                if runtime.circle_phase_bad_err_start_ms < 0:
+                    runtime.circle_phase_bad_err_start_ms = now_ms
+        else:
+            if runtime.circle_phase_bad_err_start_ms < 0:
+                runtime.circle_phase_bad_err_start_ms = now_ms
         runtime.circle_phase_speed_scale += (
             target_scale - runtime.circle_phase_speed_scale
         ) * CIRCLE_PHASE_SPEED_ALPHA
-        if runtime.circle_phase_speed_scale < 0.02:
-            runtime.circle_phase_speed_scale = 0.0
-        elif runtime.circle_phase_speed_scale > 1.0:
+        if runtime.circle_phase_speed_scale > 1.0:
             runtime.circle_phase_speed_scale = 1.0
         return runtime.circle_phase_speed_scale
 
     def override_control_obj(self, runtime, control_obj, output_valid, box_factory, now_ms, tx_offset=None, offset_fn=None):
-        if control_obj is None or not output_valid:
+        if control_obj is None and runtime.circle_start_ms < 0:
             return control_obj
         if runtime.circle_start_ms < 0 or runtime.done:
             return control_obj
@@ -150,6 +173,17 @@ class ExtCircleTask(BasicCenterTask):
         if geometry is None:
             return control_obj
 
+        class_id = runtime.lock_class_id
+        score = runtime.lock_score
+        if control_obj is not None:
+            class_id = control_obj.class_id
+            score = control_obj.score
+        if class_id < 0:
+            class_id = runtime.circle_output_class_id
+            score = runtime.circle_output_score
+        if class_id < 0:
+            class_id = 0
+
         if runtime.circle_last_phase_ms < 0:
             runtime.circle_last_phase_ms = now_ms
         dt_ms = max(0, now_ms - runtime.circle_last_phase_ms)
@@ -158,10 +192,10 @@ class ExtCircleTask(BasicCenterTask):
         phase_tx_offset = tx_offset
         if offset_fn is not None:
             hold_px, hold_py = self._point_at_phase(geometry, runtime.circle_phase, elapsed)
-            hold_obj = box_factory(hold_px, hold_py, 8, 8, control_obj.class_id, control_obj.score)
+            hold_obj = box_factory(hold_px, hold_py, 8, 8, class_id, score)
             phase_tx_offset = offset_fn(hold_obj)
 
-        speed_scale = self._phase_speed_scale(runtime, output_valid, phase_tx_offset)
+        speed_scale = self._phase_speed_scale(runtime, output_valid, phase_tx_offset, now_ms)
         runtime.circle_phase += (
             float(dt_ms) / float(CIRCLE_TRACE_MS)
         ) * 2.0 * math.pi * speed_scale
@@ -175,7 +209,11 @@ class ExtCircleTask(BasicCenterTask):
             runtime.status = "TRACE %.2f" % speed_scale
 
         px, py = self._point_at_phase(geometry, phase, elapsed)
-        out_obj = box_factory(px, py, 8, 8, control_obj.class_id, control_obj.score)
+        runtime.circle_output_cx = px
+        runtime.circle_output_cy = py
+        runtime.circle_output_class_id = class_id
+        runtime.circle_output_score = score
+        out_obj = box_factory(px, py, 8, 8, class_id, score)
         if phase >= 2.0 * math.pi and offset_fn is not None:
             close_offset = offset_fn(out_obj)
             if is_locked(output_valid, close_offset):

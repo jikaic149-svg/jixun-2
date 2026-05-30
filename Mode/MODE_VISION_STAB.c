@@ -33,6 +33,7 @@ static float vision_control_dy = 0.0f;
 static float vision_predict_dx = 0.0f;
 static float vision_predict_dy = 0.0f;
 static uint32_t vision_predict_ms = 0U;
+static uint8_t vision_sample_flag = 0U;
 static uint8_t vision_sample_valid = 0U;
 static uint8_t vision_sample_circle = 0U;
 static uint8_t vision_active_flag = 0U;
@@ -137,6 +138,7 @@ static void reset_to_current(void)
     vision_predict_dx = 0.0f;
     vision_predict_dy = 0.0f;
     vision_predict_ms = 0U;
+    vision_sample_flag = 0U;
     vision_sample_valid = 0U;
     vision_sample_circle = 0U;
     vision_active_flag = 0U;
@@ -223,6 +225,7 @@ void MODE_VISION_STAB_ResetTarget(void)
     vision_predict_dx = 0.0f;
     vision_predict_dy = 0.0f;
     vision_predict_ms = 0U;
+    vision_sample_flag = 0U;
     vision_sample_valid = 0U;
     vision_sample_circle = 0U;
     vision_active_flag = 0U;
@@ -258,6 +261,16 @@ float MODE_VISION_STAB_GetVisionInputDy(void)
     return vision_control_dy;
 }
 
+float MODE_VISION_STAB_GetVisionFilteredDx(void)
+{
+    return vision_filtered_dx;
+}
+
+float MODE_VISION_STAB_GetVisionFilteredDy(void)
+{
+    return vision_filtered_dy;
+}
+
 float MODE_VISION_STAB_GetVisionPredictDx(void)
 {
     return vision_predict_dx;
@@ -271,6 +284,16 @@ float MODE_VISION_STAB_GetVisionPredictDy(void)
 uint32_t MODE_VISION_STAB_GetVisionPredictMs(void)
 {
     return vision_predict_ms;
+}
+
+uint8_t MODE_VISION_STAB_GetVisionSampleValid(void)
+{
+    return vision_sample_flag;
+}
+
+uint8_t MODE_VISION_STAB_GetVisionSampleCircle(void)
+{
+    return vision_sample_circle;
 }
 
 void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
@@ -328,6 +351,7 @@ void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
                 float dt_s;
                 float raw_dx_f;
                 float raw_dy_f;
+                uint8_t raw_flag = vision_raw_flag;
                 vision_last_update_ms = vision_loop_ms;
                 dt_update_ms = vision_prev_update_ms > 0U ?
                                (vision_last_update_ms - vision_prev_update_ms) :
@@ -356,6 +380,7 @@ void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
                 vision_meas_dx = raw_dx_f;
                 vision_meas_dy = raw_dy_f;
                 vision_prev_update_ms = vision_last_update_ms;
+                vision_sample_flag = raw_flag;
                 vision_sample_circle = vision_raw_circle;
                 vision_sample_valid = 1U;
                 vision_last_search_ms = 0U;
@@ -377,6 +402,7 @@ void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
                 vision_predict_dx = 0.0f;
                 vision_predict_dy = 0.0f;
                 vision_predict_ms = 0U;
+                vision_sample_flag = 0U;
                 vision_sample_valid = 0U;
                 vision_sample_circle = 0U;
                 if (vision_raw_search) {
@@ -428,6 +454,10 @@ void MODE_VISION_STAB_Update(GimbalModeOutput_t *out)
                     vision_predict_dx = 0.0f;
                     vision_predict_dy = 0.0f;
                     vision_predict_ms = 0U;
+                    if (vision_sample_flag == 6U) {
+                        vision_input_dx *= VISION_CIRCLE_PREDICT_SAMPLE_WEIGHT;
+                        vision_input_dy *= VISION_CIRCLE_PREDICT_SAMPLE_WEIGHT;
+                    }
 #if VISION_CIRCLE_PREDICT_ENABLE
                     {
                         uint32_t predict_ms = vision_loop_ms - vision_last_update_ms;

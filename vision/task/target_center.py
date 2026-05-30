@@ -1,8 +1,5 @@
 import math
 
-CIRCLE_RADIUS_DEADBAND = 4
-CIRCLE_SIZE_DEADBAND = 8
-
 
 class CircleKalmanTracker:
     def __init__(self, process_var=160.0, radius_process_var=70.0,
@@ -808,20 +805,14 @@ class TargetCenterFinder:
             self.circle_kalman.reset()
             return None
         kx, ky, kr = filtered
-        if self.last_circle_r > 0 and abs(int(kr) - self.last_circle_r) <= CIRCLE_RADIUS_DEADBAND:
-            kr = self.last_circle_r
+        if self.last_circle_r > 0:
+            kr = int(self.last_circle_r * 0.70 + int(kr) * 0.30 + 0.5)
         if source.startswith("ellipse"):
             out_w = int(width)
             out_h = int(height)
         elif self.last_center_w > 0 and self.last_center_h > 0:
-            if abs(int(width) - self.last_center_w) <= CIRCLE_SIZE_DEADBAND:
-                out_w = self.last_center_w
-            else:
-                out_w = int(self.last_center_w * 0.35 + width * 0.65)
-            if abs(int(height) - self.last_center_h) <= CIRCLE_SIZE_DEADBAND:
-                out_h = self.last_center_h
-            else:
-                out_h = int(self.last_center_h * 0.35 + height * 0.65)
+            out_w = int(self.last_center_w * 0.35 + width * 0.65)
+            out_h = int(self.last_center_h * 0.35 + height * 0.65)
         else:
             out_w = int(width)
             out_h = int(height)

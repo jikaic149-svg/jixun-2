@@ -491,8 +491,10 @@ void INS_Task(void *argument)
         vision_raw_dy = Vision_GetDy(&g_vision);
         {
             uint8_t vis_valid = Vision_IsValid(&g_vision);
+            vision_raw_flag = vis_valid;
             if (vis_valid == 4U) {
                 vision_raw_valid = 0U;
+                vision_raw_flag = 0U;
                 vision_raw_search = 0U;
                 vision_raw_circle = 0U;
                 vision_raw_dx = 0;
@@ -519,8 +521,8 @@ void INS_Task(void *argument)
             uint32_t vis_frame_seq = Vision_GetFrameSeq(&g_vision);
 
             uint32_t now_ms = (uint32_t)xTaskGetTickCount();
-            static char vision_tx_buf[240];
-            sprintf(vision_tx_buf, "M,STAT,%lu,%u,%d,%d,%u,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%u,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%lu\r\n",
+            static char vision_tx_buf[280];
+            sprintf(vision_tx_buf, "M,STAT,%lu,%u,%d,%d,%u,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%u,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%lu,%u,%u,%.1f,%.1f\r\n",
                     now_ms,
                     (unsigned)gimbal_state,
                     vis_dx,
@@ -539,7 +541,11 @@ void INS_Task(void *argument)
                     MODE_VISION_STAB_GetVisionInputDy(),
                     MODE_VISION_STAB_GetVisionPredictDx(),
                     MODE_VISION_STAB_GetVisionPredictDy(),
-                    MODE_VISION_STAB_GetVisionPredictMs());
+                    MODE_VISION_STAB_GetVisionPredictMs(),
+                    (unsigned)MODE_VISION_STAB_GetVisionSampleValid(),
+                    (unsigned)MODE_VISION_STAB_GetVisionSampleCircle(),
+                    MODE_VISION_STAB_GetVisionFilteredDx(),
+                    MODE_VISION_STAB_GetVisionFilteredDy());
             Vision_Send(&g_vision, (const uint8_t *)vision_tx_buf, strlen(vision_tx_buf));
         }
 

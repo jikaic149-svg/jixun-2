@@ -27,8 +27,13 @@ class TaskRuntime:
         self.circle_trace_cy = -1
         self.circle_trace_rx = -1.0
         self.circle_trace_ry = -1.0
+        self.circle_output_cx = -1
+        self.circle_output_cy = -1
+        self.circle_output_class_id = -1
+        self.circle_output_score = 0.0
         self.circle_phase = 0.0
         self.circle_phase_speed_scale = 0.0
+        self.circle_phase_bad_err_start_ms = -1
         self.circle_last_phase_ms = -1
         self.circle_close_start_ms = -1
         self.scan_votes = []
@@ -58,8 +63,13 @@ class TaskRuntime:
         self.circle_trace_cy = -1
         self.circle_trace_rx = -1.0
         self.circle_trace_ry = -1.0
+        self.circle_output_cx = -1
+        self.circle_output_cy = -1
+        self.circle_output_class_id = -1
+        self.circle_output_score = 0.0
         self.circle_phase = 0.0
         self.circle_phase_speed_scale = 0.0
+        self.circle_phase_bad_err_start_ms = -1
         self.circle_last_phase_ms = -1
         self.circle_close_start_ms = -1
         self.scan_votes = []

@@ -23,6 +23,7 @@ extern volatile uint8_t gimbal_stab_target_reset;
 extern volatile int16_t vision_raw_dx;
 extern volatile int16_t vision_raw_dy;
 extern volatile uint8_t vision_raw_valid;
+extern volatile uint8_t vision_raw_flag;
 extern volatile uint8_t vision_raw_search;
 extern volatile uint8_t vision_raw_circle;
 extern volatile uint32_t vision_raw_frame_count;

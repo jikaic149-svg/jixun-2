@@ -11,8 +11,12 @@ float MODE_VISION_STAB_GetVisionPitchOffset(void);
 float MODE_VISION_STAB_GetVisionYawOffset(void);
 float MODE_VISION_STAB_GetVisionInputDx(void);
 float MODE_VISION_STAB_GetVisionInputDy(void);
+float MODE_VISION_STAB_GetVisionFilteredDx(void);
+float MODE_VISION_STAB_GetVisionFilteredDy(void);
 float MODE_VISION_STAB_GetVisionPredictDx(void);
 float MODE_VISION_STAB_GetVisionPredictDy(void);
 uint32_t MODE_VISION_STAB_GetVisionPredictMs(void);
+uint8_t MODE_VISION_STAB_GetVisionSampleValid(void);
+uint8_t MODE_VISION_STAB_GetVisionSampleCircle(void);
 
 #endif /* MODE_VISION_STAB_H */

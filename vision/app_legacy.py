@@ -1,6 +1,6 @@
 
 from maix import camera, display, image, nn, app, comm, touchscreen, time, uart
-import struct, os
+import struct, os, math
 try:
     import _thread
 except Exception:
@@ -10,7 +10,7 @@ from trackers.kalman_center_tracker import KalmanCenterTracker
 from trackers.snap_gate import StrongSnapGate
 from comm.udp_debug import UdpDebugSender
 from task import BTaskController, TASK_NAMES
-from task.constants import MCU_READY_STATES, MCU_STATE_CALIBRATING, TASK_BASIC_REAIM_CENTER, TASK_EXT_CIRCLE
+from task.constants import MCU_READY_STATES, MCU_STATE_CALIBRATING, MCU_STATE_VISION_STAB, TASK_BASIC_REAIM_CENTER, TASK_EXT_CIRCLE
 from task.target_center import TargetCenterFinder
 
 try:
@@ -42,6 +42,8 @@ TASK_DEBUG_ENABLE = True
 TASK_DEBUG_CONSOLE_ENABLE = False
 TASK_DEBUG_UDP_ENABLE = True
 TASK_DEBUG_PERIOD_MS = 300
+MCU_OFFLINE_DEBUG_ENABLE = False
+MCU_OFFLINE_STALE_MS = 1200
 SAFE_TX_MAX_STEP_X = 75
 SAFE_TX_MAX_STEP_Y = 62
 SAFE_TX_MAX_ABS_X = 160
@@ -403,6 +405,7 @@ last_task_debug_ms = 0
 last_loop_tick_ms = -1
 loop_dt_ema_ms = 0.0
 app_fps = 0.0
+last_mcu_stat_ms = -1
 last_yolo_tick_ms = -1
 yolo_dt_ema_ms = 0.0
 yolo_fps = 0.0
@@ -440,6 +443,10 @@ stat = {
     "vision_yaw_offset": 0.0,
     "vision_input_dx": 0.0,
     "vision_input_dy": 0.0,
+    "vision_filtered_dx": 0.0,
+    "vision_filtered_dy": 0.0,
+    "vision_valid": 0,
+    "vision_circle": 0,
     "vision_predict_dx": 0.0,
     "vision_predict_dy": 0.0,
     "vision_predict_ms": 0,
@@ -600,7 +607,7 @@ def uart_write(text):
         stat["tx"] += len(text)
 
 def parse_line(line):
-    global last_stat_log_ms
+    global last_stat_log_ms, last_mcu_stat_ms
 
     idx = line.find("M,STAT,")
     if idx > 0:
@@ -633,6 +640,11 @@ def parse_line(line):
                     next_stat["vision_predict_dx"] = float(parts[18])
                     next_stat["vision_predict_dy"] = float(parts[19])
                     next_stat["vision_predict_ms"] = int(parts[20])
+                if len(parts) >= 25:
+                    next_stat["vision_valid"] = int(parts[21])
+                    next_stat["vision_circle"] = int(parts[22])
+                    next_stat["vision_filtered_dx"] = float(parts[23])
+                    next_stat["vision_filtered_dy"] = float(parts[24])
             else:
                 next_stat["pitch_abs"] = float(parts[3])
                 next_stat["yaw_abs"] = float(parts[4])
@@ -655,17 +667,20 @@ def parse_line(line):
             log("bad stat: %s line=%s" % (e, line))
             return
         stat.update(next_stat)
+        last_mcu_stat_ms = time.ticks_ms()
 
         now = time.ticks_ms()
         if now - last_stat_log_ms >= STAT_LOG_PERIOD_MS:
             last_stat_log_ms = now
-            log("t=%lu state=%s(%d) key=%d raw=%d hold=%lu pitch=%.2f enc=%.2f yaw=%.2f ip=%.2f iy=%.2f dx=%d dy=%d vi=%.1f,%.1f pr=%.1f,%.1f,%d va=%d vpo=%.3f vyo=%.3f" %
+            log("t=%lu state=%s(%d) key=%d raw=%d hold=%lu pitch=%.2f enc=%.2f yaw=%.2f ip=%.2f iy=%.2f dx=%d dy=%d vv=%d vc=%d vi=%.1f,%.1f vf=%.1f,%.1f pr=%.1f,%.1f,%d va=%d vpo=%.3f vyo=%.3f" %
                 (stat["time_ms"], state_name(), stat["state"],
                  stat["key"], stat["key_raw"], stat["key_hold_ms"],
                  stat["pitch_abs"], stat["pitch_enc"],
                  stat["yaw_abs"], stat["pitch_current"], stat["yaw_current"],
                  stat["dx"], stat["dy"],
+                 stat["vision_valid"], stat["vision_circle"],
                  stat["vision_input_dx"], stat["vision_input_dy"],
+                 stat["vision_filtered_dx"], stat["vision_filtered_dy"],
                  stat["vision_predict_dx"], stat["vision_predict_dy"],
                  stat["vision_predict_ms"],
                  stat["vision_active"], stat["vision_pitch_offset"], stat["vision_yaw_offset"]))
@@ -695,6 +710,15 @@ def poll_uart():
                 line_buf.append(b)
             else:
                 line_buf.clear()
+
+def effective_mcu_state(now_ms=None):
+    if now_ms is None:
+        now_ms = time.ticks_ms()
+    if not MCU_OFFLINE_DEBUG_ENABLE:
+        return stat["state"]
+    if last_mcu_stat_ms < 0 or now_ms - last_mcu_stat_ms > MCU_OFFLINE_STALE_MS:
+        return MCU_STATE_VISION_STAB
+    return stat["state"]
 
 def encode_objs(objs):
     '''
@@ -883,7 +907,8 @@ def update_preaim_from_obj(obj, now_ms):
 def update_preaim_if_waiting(obj, now_ms):
     if task_controller is None or not task_controller.selected or task_controller.running:
         return
-    if stat["state"] not in (MCU_STATE_CALIBRATING,) and stat["state"] not in MCU_READY_STATES:
+    mcu_state = effective_mcu_state(now_ms)
+    if mcu_state not in (MCU_STATE_CALIBRATING,) and mcu_state not in MCU_READY_STATES:
         return
     update_preaim_from_obj(obj, now_ms)
 
@@ -961,6 +986,14 @@ def roi_diagonal_center(roi):
 
 def is_circle_task():
     return task_controller is not None and task_controller.task_id == TASK_EXT_CIRCLE
+
+def circle_center_is_measured():
+    return (
+        target_center_result is not None and
+        target_center_result.valid and
+        target_center_result.meas_cx >= 0 and
+        target_center_result.meas_cy >= 0
+    )
 
 def is_plain_running_task():
     return (
@@ -1345,10 +1378,11 @@ def send_target(obj, search_request = False, circle_mode = False, prediction_mod
             last_valid_tx_flag = 3 if not prediction_mode else 6
             uart_write("%d,%d,%d\n" % (safe_tx_dx, safe_tx_dy, last_valid_tx_flag))
             return
-        circle_tx_set_measurement(raw_dx, raw_dy, now)
-        if _thread is not None:
-            ensure_circle_tx_thread()
-            return
+        if not prediction_mode:
+            circle_tx_set_measurement(raw_dx, raw_dy, now)
+            if _thread is not None:
+                ensure_circle_tx_thread()
+                return
         raw_dx, raw_dy = quantize_circle_offset(raw_dx, raw_dy)
     else:
         circle_tx_disable(False)
@@ -3156,7 +3190,8 @@ def handle_touch_press(raw_x, raw_y, img, objs):
         return
     if class_id == TASK_SELECT_CODE:
         if task_controller is not None:
-            if task_controller.select_task(cx, time.ticks_ms(), stat["state"]):
+            now_ms = time.ticks_ms()
+            if task_controller.select_task(cx, now_ms, effective_mcu_state(now_ms)):
                 cancel_done_signal()
                 clear_selection(True)
                 reset_tx_filter()
@@ -3219,6 +3254,21 @@ def draw_target_crosses(img, target_obj):
         img.draw_circle(px, py, 9, color = COLOR_BLACK, thickness = 3)
         img.draw_circle(px, py, 8, color = COLOR_BLUE, thickness = 2)
 
+def draw_ellipse_outline(img, cx, cy, rx, ry, color, thickness=1):
+    segments = 36
+    prev_x = int(cx + rx + 0.5)
+    prev_y = int(cy + 0.5)
+    for i in range(1, segments + 1):
+        phase = math.pi * 2.0 * float(i) / float(segments)
+        x = int(cx + math.cos(phase) * rx + 0.5)
+        y = int(cy + math.sin(phase) * ry + 0.5)
+        try:
+            img.draw_line(prev_x, prev_y, x, y, color = color, thickness = thickness)
+        except Exception:
+            return
+        prev_x = x
+        prev_y = y
+
 def draw_target_center_result(img):
     runtime = task_controller.runtime if task_controller is not None else None
     if (runtime is not None and
@@ -3227,10 +3277,11 @@ def draw_target_center_result(img):
             runtime.circle_trace_rx > 0):
         cx = int(runtime.circle_trace_cx + 0.5)
         cy = int(runtime.circle_trace_cy + 0.5)
-        radius = int(max(runtime.circle_trace_rx, runtime.circle_trace_ry) + 0.5)
+        rx = int(runtime.circle_trace_rx + 0.5)
+        ry = int(runtime.circle_trace_ry + 0.5)
         img.draw_cross(cx, cy, color = COLOR_BLACK, size = 30, thickness = 5)
         img.draw_cross(cx, cy, color = image.COLOR_GREEN, size = 26, thickness = 3)
-        img.draw_circle(cx, cy, radius, color = image.COLOR_GREEN, thickness = 2)
+        draw_ellipse_outline(img, cx, cy, rx, ry, image.COLOR_GREEN, 2)
         draw_label(img, cx + 8, cy, "circle", image.COLOR_GREEN)
         return
     if target_center_result is None:
@@ -3312,7 +3363,9 @@ def draw_side_panel(img, objs, target_obj, class_id):
     img.draw_string(calib_tab[0] + 12, calib_tab[1] + 8, "Aim", color = COLOR_WHITE, scale = PANEL_TEXT_SCALE)
 
     if ui_page == UI_PAGE_TASK:
-        status = "MCU:%s  %s" % (state_name(), task_controller.status_text(display_label) if task_controller else "")
+        offline = MCU_OFFLINE_DEBUG_ENABLE and (last_mcu_stat_ms < 0 or time.ticks_ms() - last_mcu_stat_ms > MCU_OFFLINE_STALE_MS)
+        mcu_text = "OFFLINE" if offline else state_name()
+        status = "MCU:%s  %s" % (mcu_text, task_controller.status_text(display_label) if task_controller else "")
         img.draw_string(PANEL_X + PANEL_PAD, 56, status, color = COLOR_STATUS, scale = UI_SCALE)
         if task_controller is not None:
             for i, task_id in enumerate(task_controller.available_tasks()):
@@ -3463,7 +3516,7 @@ def run():
         poll_uart()
         if task_controller is not None:
             now_ms = loop_now_ms
-            if task_controller.sync_mcu_state(stat["state"], now_ms):
+            if task_controller.sync_mcu_state(effective_mcu_state(now_ms), now_ms):
                 cancel_done_signal()
                 begin_center_refine_start_gate(now_ms)
                 clear_selection(False)
@@ -3859,7 +3912,7 @@ def run():
             if (target_center_result is not None and target_center_result.valid and
                     accept_center_refine(center_input_obj, target_center_result, time.ticks_ms())):
                 if task_controller.task_id == TASK_EXT_CIRCLE:
-                    e1_center_ready = target_center_result.reason.find("hold") < 0
+                    e1_center_ready = target_center_result.meas_cx >= 0 and target_center_result.meas_cy >= 0
                     if e1_center_ready:
                         task_controller.runtime.circle_center_cx = target_center_result.cx
                         task_controller.runtime.circle_center_cy = target_center_result.cy
@@ -3877,6 +3930,13 @@ def run():
                                             refine_obj.score)
                 output_valid = True
                 target_objs = [control_obj]
+                if (task_controller.task_id == TASK_EXT_CIRCLE and
+                        not e1_center_ready and
+                        task_controller.runtime.circle_start_ms < 0):
+                    task_controller.runtime.status = "CENTER " + target_center_result.reason
+                    control_obj = None
+                    target_objs = []
+                    output_valid = False
             elif target_center_result is not None:
                 task_controller.runtime.status = "CENTER " + target_center_result.reason
                 if task_controller.task_id != TASK_EXT_CIRCLE:
@@ -3890,7 +3950,8 @@ def run():
         if (task_controller is not None and
                 task_controller.task_id == TASK_EXT_CIRCLE and
                 task_controller.running and
-                vision_track_state != VSTATE_TRACK):
+                vision_track_state != VSTATE_TRACK and
+                task_controller.runtime.circle_start_ms < 0):
             control_obj = None
             target_objs = []
             output_valid = False
@@ -3909,9 +3970,16 @@ def run():
             control_prediction = bool(target_obj is not None and not update_lock and suspect_frames > 0)
             if (task_controller is not None and task_controller.running and
                     task_controller.task_id == TASK_EXT_CIRCLE):
+                control_prediction = not circle_center_is_measured()
                 task_tx_offset = target_offset_for_circle(control_obj)
             else:
                 task_tx_offset = target_offset_for_mcu(control_obj)
+        elif (task_controller is not None and
+                task_controller.running and
+                task_controller.task_id == TASK_EXT_CIRCLE and
+                task_controller.runtime.circle_start_ms >= 0 and
+                task_controller.runtime.circle_trace_cx >= 0):
+            output_valid = True
         if task_controller is not None:
             if task_controller.update_lock(control_obj, output_valid, task_tx_offset, time.ticks_ms()):
                 clear_selection(False)
@@ -3938,6 +4006,11 @@ def run():
                 task_tx_offset,
                 target_offset_for_circle,
             )
+            if (control_obj is not None and output_valid and
+                    task_controller.running and
+                    task_controller.task_id == TASK_EXT_CIRCLE and
+                    task_controller.runtime.circle_start_ms >= 0):
+                target_objs = [control_obj]
             if control_obj is None and task_controller.runtime.done:
                 output_valid = False
                 task_tx_offset = None
@@ -3946,9 +4019,16 @@ def run():
                 control_prediction = bool(target_obj is not None and not update_lock and suspect_frames > 0)
                 if (task_controller.running and
                         task_controller.task_id == TASK_EXT_CIRCLE):
+                    control_prediction = not circle_center_is_measured()
                     task_tx_offset = target_offset_for_circle(control_obj)
                 else:
                     task_tx_offset = target_offset_for_mcu(control_obj)
+            elif (task_controller.running and
+                    task_controller.task_id == TASK_EXT_CIRCLE and
+                    task_controller.runtime.circle_start_ms >= 0 and
+                    task_controller.runtime.circle_trace_cx >= 0):
+                output_valid = True
+                task_tx_offset = target_offset_for_circle(control_obj)
 
         search_request = should_yaw_search_for_target(control_obj)
         circle_mode = (

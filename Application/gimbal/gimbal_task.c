@@ -17,6 +17,7 @@ volatile uint8_t gimbal_stab_target_reset = 1U;
 volatile int16_t vision_raw_dx = 0;
 volatile int16_t vision_raw_dy = 0;
 volatile uint8_t vision_raw_valid = 0;
+volatile uint8_t vision_raw_flag = 0;
 volatile uint8_t vision_raw_search = 0;
 volatile uint8_t vision_raw_circle = 0;
 volatile uint32_t vision_raw_frame_count = 0;
