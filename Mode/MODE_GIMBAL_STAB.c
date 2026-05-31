@@ -9,9 +9,7 @@ static float target_yaw = 0.0f;
 static float target_pitch = 0.0f;
 static float target_enc_yaw = 0.0f;
 static float pitch_i_out = 0.0f;
-static float yaw_i_out = 0.0f;
 static float filtered_pitch_speed = 0.0f;
-static float filtered_yaw_speed = 0.0f;
 static uint8_t first_enter = 1U;
 
 static float wrap_angle_error(float err)
@@ -56,7 +54,8 @@ static float wrap_0_360(float angle)
 static void refresh_target_enc_yaw(void)
 {
     float yaw_delta = wrap_angle_error(target_yaw - global_gimbal_yaw);
-    target_enc_yaw = wrap_0_360(yaw_motor.angle + yaw_delta);
+    target_enc_yaw = wrap_0_360(yaw_motor.angle +
+                                yaw_delta * YAW_ENC_FROM_IMU_POLARITY);
 }
 
 static void reset_target_to_current(void)
@@ -67,7 +66,6 @@ static void reset_target_to_current(void)
     target_yaw = wrap_0_360(global_gimbal_yaw);
     target_enc_yaw = yaw_motor.angle;
     pitch_i_out = 0.0f;
-    yaw_i_out = 0.0f;
     first_enter = 0U;
     gimbal_stab_target_reset = 0U;
     MODE_ANGLE_LOOP_ResetAll();
@@ -77,7 +75,6 @@ void MODE_GIMBAL_STAB_ResetTarget(void)
 {
     first_enter = 1U;
     pitch_i_out = 0.0f;
-    yaw_i_out = 0.0f;
     MODE_ANGLE_LOOP_ResetAll();
 }
 
@@ -105,7 +102,6 @@ float MODE_GIMBAL_STAB_GetTargetYaw(void)
 void MODE_GIMBAL_STAB_Update(GimbalModeOutput_t *out)
 {
     filtered_pitch_speed = 0.3f * filtered_pitch_speed + 0.7f * global_imu_pitch_speed;
-    filtered_yaw_speed = 0.3f * filtered_yaw_speed + 0.7f * global_imu_yaw_speed;
 
     if (first_enter || gimbal_stab_target_reset) {
         reset_target_to_current();
@@ -113,7 +109,6 @@ void MODE_GIMBAL_STAB_Update(GimbalModeOutput_t *out)
 
     if (flag_ext_yaw) {
         target_yaw = wrap_0_360(ext_target_yaw);
-        yaw_i_out = 0.0f;
         MODE_ANGLE_LOOP_YawReset();
         flag_ext_yaw = 0U;
     }
@@ -121,14 +116,10 @@ void MODE_GIMBAL_STAB_Update(GimbalModeOutput_t *out)
     refresh_target_enc_yaw();
 
     float err_pitch = wrap_angle_error(target_pitch - global_gimbal_pitch);
-    float err_yaw = wrap_angle_error(target_yaw - global_gimbal_yaw);
     float original_err_pitch = err_pitch;
-    float original_err_yaw = err_yaw;
 
     err_pitch = limit_float(err_pitch, GIMBAL_STAB_PITCH_MAX_ERR_DEG);
-    err_yaw = limit_float(err_yaw, GIMBAL_MAX_ERR_YAW);
     err_pitch = apply_deadband(err_pitch, GIMBAL_STAB_PITCH_DEADBAND_DEG);
-    err_yaw = apply_deadband(err_yaw, GIMBAL_YAW_DEADBAND);
 
 #if GIMBAL_STAB_PITCH_I_ENABLE
     if (original_err_pitch > GIMBAL_STAB_PITCH_I_SEPARATE_ERR_DEG ||
@@ -146,13 +137,6 @@ void MODE_GIMBAL_STAB_Update(GimbalModeOutput_t *out)
     (void)original_err_pitch;
     pitch_i_out = 0.0f;
 #endif
-
-    if (original_err_yaw > 3.0f || original_err_yaw < -3.0f) {
-        yaw_i_out = 0.0f;
-    } else {
-        yaw_i_out += GIMBAL_PID_YAW_KI * original_err_yaw * ANGLE_LOOP_DT_SEC;
-        yaw_i_out = limit_float(yaw_i_out, GIMBAL_MAX_I_YAW);
-    }
 
 #if GIMBAL_STAB_PITCH_ENABLE
     {
@@ -177,14 +161,10 @@ void MODE_GIMBAL_STAB_Update(GimbalModeOutput_t *out)
 
 #if GIMBAL_STAB_YAW_ENABLE
     {
-        float yaw_angle_current = MODE_ANGLE_LOOP_YawUpdate(target_enc_yaw);
-        float yaw_stab_current = (GIMBAL_PID_YAW_KP * err_yaw + yaw_i_out -
-                                  GIMBAL_PID_YAW_KD * filtered_yaw_speed) *
-                                 YAW_POLARITY;
-        out->yaw_current = yaw_angle_current + yaw_stab_current;
+        out->yaw_current = MODE_ANGLE_LOOP_YawUpdate(target_enc_yaw);
     }
 #else
-    yaw_i_out = 0.0f;
+    MODE_ANGLE_LOOP_YawReset();
     out->yaw_current = 0.0f;
 #endif
 }

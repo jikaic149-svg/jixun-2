@@ -42,6 +42,8 @@ TASK_DEBUG_ENABLE = True
 TASK_DEBUG_CONSOLE_ENABLE = False
 TASK_DEBUG_UDP_ENABLE = True
 TASK_DEBUG_PERIOD_MS = 300
+TX_CHAIN_DEBUG_ENABLE = True
+TX_CHAIN_DEBUG_PERIOD_MS = 50
 MCU_OFFLINE_DEBUG_ENABLE = False
 MCU_OFFLINE_STALE_MS = 1200
 SAFE_TX_MAX_STEP_X = 75
@@ -402,6 +404,7 @@ udp_debug = UdpDebugSender(UDP_DEBUG_ENABLE, UDP_DEBUG_HOST, UDP_DEBUG_PORT)
 last_udp_debug_ms = 0
 last_console_debug_ms = 0
 last_task_debug_ms = 0
+last_tx_chain_debug_ms = 0
 last_loop_tick_ms = -1
 loop_dt_ema_ms = 0.0
 app_fps = 0.0
@@ -1188,6 +1191,105 @@ def target_offset_for_circle(obj):
     raw_dy = clamp_abs(raw_dy, SAFE_TX_MAX_ABS_Y)
     return raw_dx, raw_dy
 
+def target_output_detail(obj, circle_mode = False):
+    offset = target_offset(obj)
+    if offset is None:
+        return None
+    raw_dx, raw_dy = offset
+    if circle_mode:
+        deadband_x = CIRCLE_OUTPUT_DEADBAND_X
+        deadband_y = CIRCLE_OUTPUT_DEADBAND_Y
+        scale_x = CIRCLE_OUTPUT_SCALE_X
+        scale_y = CIRCLE_OUTPUT_SCALE_Y
+        polarity_x = CIRCLE_OUTPUT_POLARITY_X
+        polarity_y = CIRCLE_OUTPUT_POLARITY_Y
+        db_dx = apply_output_deadband(raw_dx, deadband_x)
+        db_dy = apply_output_deadband(raw_dy, deadband_y)
+        scaled_dx = db_dx * scale_x
+        scaled_dy = db_dy * scale_y
+        pol_dx = scaled_dx * polarity_x
+        pol_dy = scaled_dy * polarity_y
+        out_dx = clamp_abs(pol_dx, SAFE_TX_MAX_ABS_X)
+        out_dy = clamp_abs(pol_dy, SAFE_TX_MAX_ABS_Y)
+    else:
+        deadband_x = TARGET_OUTPUT_DEADBAND_X
+        deadband_y = TARGET_OUTPUT_DEADBAND_Y
+        scale_x = TARGET_OUTPUT_SCALE_X
+        scale_y = TARGET_OUTPUT_SCALE_Y
+        polarity_x = TARGET_OUTPUT_POLARITY_X
+        polarity_y = TARGET_OUTPUT_POLARITY_Y
+        db_dx = apply_output_deadband(raw_dx, deadband_x)
+        db_dy = apply_output_deadband(raw_dy, deadband_y)
+        scaled_dx = db_dx * scale_x
+        scaled_dy = db_dy * scale_y
+        pol_dx = scaled_dx * polarity_x
+        pol_dy = scaled_dy * polarity_y
+        out_dx = clamp_abs(int(pol_dx), SAFE_TX_MAX_ABS_X)
+        out_dy = clamp_abs(int(pol_dy), SAFE_TX_MAX_ABS_Y)
+    return (raw_dx, raw_dy,
+            db_dx, db_dy,
+            scaled_dx, scaled_dy,
+            pol_dx, pol_dy,
+            out_dx, out_dy,
+            polarity_x, polarity_y)
+
+def output_negative_reason(axis_name, raw_value, deadband_value, polarity_value, output_value):
+    if output_value >= 0:
+        return axis_name + ":nonneg"
+    if raw_value < 0 and polarity_value > 0:
+        return axis_name + ":raw_neg"
+    if raw_value > 0 and polarity_value < 0:
+        return axis_name + ":pol_flip"
+    if deadband_value < 0:
+        return axis_name + ":db_neg"
+    return axis_name + ":unknown"
+
+def debug_tx_chain(stage, obj, detail, processed_dx, processed_dy,
+                   reverse_dx, reverse_dy, final_dx, final_dy, flag,
+                   circle_mode = False, force = False):
+    global last_tx_chain_debug_ms
+    if not TX_CHAIN_DEBUG_ENABLE:
+        return
+    now = time.ticks_ms()
+    if not force and now - last_tx_chain_debug_ms < TX_CHAIN_DEBUG_PERIOD_MS:
+        return
+    last_tx_chain_debug_ms = now
+    mode = "circle" if circle_mode else "normal"
+    if detail is None or obj is None:
+        log("TXDBG stage=%s mode=%s obj=none proc=%.1f,%.1f rev=%.1f,%.1f final=%.1f,%.1f flag=%d" %
+            (stage, mode,
+             processed_dx, processed_dy,
+             reverse_dx, reverse_dy,
+             final_dx, final_dy,
+             flag))
+        return
+
+    cx, cy = obj_center(obj)
+    ax, ay = aim_point()
+    (raw_dx, raw_dy,
+     db_dx, db_dy,
+     scaled_dx, scaled_dy,
+     pol_dx, pol_dy,
+     out_dx, out_dy,
+     polarity_x, polarity_y) = detail
+    why_x = output_negative_reason("x", raw_dx, db_dx, polarity_x, out_dx)
+    why_y = output_negative_reason("y", raw_dy, db_dy, polarity_y, out_dy)
+    log(("TXDBG stage=%s mode=%s ctr=%d,%d aim=%d,%d raw=%d,%d db=%.1f,%.1f "
+         "scale=%.1f,%.1f pol=%.1f,%.1f clamp=%.1f,%.1f rev=%d,%d "
+         "final=%.1f,%.1f flag=%d why=%s/%s") %
+        (stage, mode,
+         cx, cy,
+         ax, ay,
+         raw_dx, raw_dy,
+         db_dx, db_dy,
+         scaled_dx, scaled_dy,
+         pol_dx, pol_dy,
+         out_dx, out_dy,
+         reverse_dx, reverse_dy,
+         final_dx, final_dy,
+         flag,
+         why_x, why_y))
+
 def quantize_circle_offset(raw_dx, raw_dy):
     global circle_tx_residual_x, circle_tx_residual_y
     value_x = raw_dx + circle_tx_residual_x
@@ -1322,14 +1424,22 @@ def circle_tx_send_from_prediction(now_ms):
         last_tx_packet = (safe_tx_dx, safe_tx_dy)
         last_valid_tx_ms = now_ms
         last_valid_tx_flag = 6
+        debug_tx_chain("circle_pred_reject", None, None,
+                       raw_dx, raw_dy, raw_dx, raw_dy,
+                       safe_tx_dx, safe_tx_dy, 6, True, True)
         uart_write("%d,%d,6\n" % (safe_tx_dx, safe_tx_dy))
         return
+    processed_dx, processed_dy = raw_dx, raw_dy
     raw_dx, raw_dy = quantize_circle_offset(raw_dx, raw_dy)
     safe_tx_dx = limit_step(safe_tx_dx, raw_dx, CIRCLE_TX_MAX_STEP_X)
     safe_tx_dy = limit_step(safe_tx_dy, raw_dy, CIRCLE_TX_MAX_STEP_Y)
     last_tx_packet = (safe_tx_dx, safe_tx_dy)
     last_valid_tx_ms = now_ms
     last_valid_tx_flag = 6
+    debug_tx_chain("circle_pred_send", None, None,
+                   processed_dx, processed_dy,
+                   raw_dx, raw_dy,
+                   safe_tx_dx, safe_tx_dy, 6, True)
     uart_write("%d,%d,6\n" % (safe_tx_dx, safe_tx_dy))
 
 def circle_tx_thread():
@@ -1355,32 +1465,48 @@ def send_target(obj, search_request = False, circle_mode = False, prediction_mod
     if now - last_target_tx_ms < TARGET_SEND_PERIOD_MS:
         return
     last_target_tx_ms = now
+    detail = target_output_detail(obj, circle_mode)
     offset = target_offset_for_circle(obj) if circle_mode else target_offset_for_mcu(obj)
     if offset is None:
         circle_tx_disable(False)
         if last_tx_packet is not None and last_valid_tx_ms >= 0 and now - last_valid_tx_ms <= MISSING_TARGET_HOLD_MS:
+            debug_tx_chain("hold", obj, detail, safe_tx_dx, safe_tx_dy,
+                           safe_tx_dx, safe_tx_dy, safe_tx_dx, safe_tx_dy,
+                           last_valid_tx_flag, circle_mode, True)
             uart_write("%d,%d,%d\n" % (safe_tx_dx, safe_tx_dy, last_valid_tx_flag))
             return
         reset_tx_filter()
         last_valid_tx_ms = -1
         if search_request:
+            debug_tx_chain("search", obj, detail, 0, 0, 0, 0, 0, 0, 2,
+                           circle_mode, True)
             send_zero_target(2)
         else:
+            debug_tx_chain("zero", obj, detail, 0, 0, 0, 0, 0, 0, 0,
+                           circle_mode, True)
             send_zero_target(0)
         return
 
     raw_dx, raw_dy = offset
+    processed_dx, processed_dy = raw_dx, raw_dy
     raw_dx, raw_dy = prevent_tx_reverse(raw_dx, raw_dy)
+    reverse_dx, reverse_dy = raw_dx, raw_dy
     if circle_mode:
         if not accept_tx_jump(raw_dx, raw_dy):
             last_tx_packet = (safe_tx_dx, safe_tx_dy)
             last_valid_tx_ms = now
             last_valid_tx_flag = 3 if not prediction_mode else 6
+            debug_tx_chain("reject", obj, detail, processed_dx, processed_dy,
+                           reverse_dx, reverse_dy, safe_tx_dx, safe_tx_dy,
+                           last_valid_tx_flag, circle_mode, True)
             uart_write("%d,%d,%d\n" % (safe_tx_dx, safe_tx_dy, last_valid_tx_flag))
             return
         if not prediction_mode:
             circle_tx_set_measurement(raw_dx, raw_dy, now)
             if _thread is not None:
+                debug_tx_chain("circle_measure", obj, detail, processed_dx, processed_dy,
+                               reverse_dx, reverse_dy, safe_tx_dx, safe_tx_dy,
+                               3, circle_mode)
                 ensure_circle_tx_thread()
                 return
         raw_dx, raw_dy = quantize_circle_offset(raw_dx, raw_dy)
@@ -1390,6 +1516,9 @@ def send_target(obj, search_request = False, circle_mode = False, prediction_mod
             last_tx_packet = (safe_tx_dx, safe_tx_dy)
             last_valid_tx_ms = now
             last_valid_tx_flag = 1 if not prediction_mode else 5
+            debug_tx_chain("reject", obj, detail, processed_dx, processed_dy,
+                           reverse_dx, reverse_dy, safe_tx_dx, safe_tx_dy,
+                           last_valid_tx_flag, circle_mode, True)
             uart_write("%d,%d,%d\n" % (safe_tx_dx, safe_tx_dy, last_valid_tx_flag))
             return
 
@@ -1408,6 +1537,9 @@ def send_target(obj, search_request = False, circle_mode = False, prediction_mod
         valid_flag = 3 if circle_mode else 1
     last_valid_tx_ms = now
     last_valid_tx_flag = valid_flag
+    debug_tx_chain("send", obj, detail, processed_dx, processed_dy,
+                   reverse_dx, reverse_dy, safe_tx_dx, safe_tx_dy,
+                   valid_flag, circle_mode)
     uart_write("%d,%d,%d\n" % (safe_tx_dx, safe_tx_dy, valid_flag))
 
 def send_debug_status(target_obj, output_valid, yolo_obj, yolo_reason):
@@ -3957,12 +4089,12 @@ def run():
             output_valid = False
 
         if report_on:
+            body = b''
             if len(target_objs) > 0:
-                p.report(APP_CMD_DETECT_RES, encode_objs(target_objs))
+                body = encode_objs(target_objs)
             else:
                 body = encode_circle_kalman_debug(target_center_result)
-                if len(body) > 0:
-                    p.report(APP_CMD_DETECT_RES, body)
+            p.report(APP_CMD_DETECT_RES, body)
 
         task_tx_offset = None
         control_prediction = False
